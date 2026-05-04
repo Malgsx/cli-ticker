@@ -9,11 +9,17 @@ CLI Ticker is a native macOS menu bar app for tracking command-line tools instal
 Once releases are published, users can install with:
 
 ```sh
+mkdir -p "$HOME/Applications" && curl -L https://github.com/Malgsx/cli-ticker/releases/latest/download/CLITicker.app.tar.gz | tar -xz -C "$HOME/Applications" && open "$HOME/Applications/CLITicker.app"
+```
+
+This downloads the latest app bundle, installs it to `~/Applications`, and opens it. Users do not need to manually download or unpack anything.
+
+If you prefer the installer script:
+
+```sh
 curl -fsSL https://raw.githubusercontent.com/Malgsx/cli-ticker/main/scripts/install.sh | bash
 open "$HOME/Applications/CLITicker.app"
 ```
-
-The installer downloads the latest `CLITicker.app.tar.gz` release asset and installs the app to `~/Applications` by default. Users do not need to manually download or unpack anything.
 
 ## What Users Get
 
