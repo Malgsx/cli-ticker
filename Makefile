@@ -41,8 +41,8 @@ run: all
 
 dist: all
 	mkdir -p "$(BUILD_DIR)/dist"
-	rm -f "$(BUILD_DIR)/dist/$(APP_NAME).zip"
-	ditto -c -k --keepParent "$(APP_DIR)" "$(BUILD_DIR)/dist/$(APP_NAME).zip"
+	rm -f "$(BUILD_DIR)/dist/$(APP_NAME).app.tar.gz"
+	tar -C "$(BUILD_DIR)" -czf "$(BUILD_DIR)/dist/$(APP_NAME).app.tar.gz" "$(APP_NAME).app"
 
 clean:
 	rm -rf "$(BUILD_DIR)"

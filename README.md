@@ -13,7 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/Malgsx/cli-ticker/main/scripts/inst
 open "$HOME/Applications/CLITicker.app"
 ```
 
-The installer downloads the latest `CLITicker.zip` release and installs the app to `~/Applications` by default.
+The installer downloads the latest `CLITicker.app.tar.gz` release asset and installs the app to `~/Applications` by default. Users do not need to manually download or unpack anything.
 
 ## What Users Get
 
@@ -72,7 +72,7 @@ make dist
 This creates:
 
 ```sh
-build/dist/CLITicker.zip
+build/dist/CLITicker.app.tar.gz
 ```
 
 For public distribution, the next step is signing and notarization with an Apple Developer ID.
@@ -84,7 +84,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The GitHub Actions release workflow builds `CLITicker.zip` and attaches it to the GitHub release. For a trusted public app, sign and notarize before promoting the release broadly.
+The GitHub Actions release workflow builds `CLITicker.app.tar.gz` and attaches it to the GitHub release. For a trusted public app, sign and notarize before promoting the release broadly.
 
 ## Forking
 
@@ -101,7 +101,7 @@ Forks can change known agent tools, package-manager scanners, branding, reports,
 
 - Replace `local.codex.cliticker` with the final bundle identifier.
 - Sign the app with Developer ID Application.
-- Notarize the zip or DMG.
+- Notarize the app archive or DMG.
 - Add a first-run explanation of what is scanned and where reports are saved.
 - Add an explicit opt-in before adding remote announcement/update APIs.
 - Decide whether update actions should be read-only recommendations or one-click package-manager updates.

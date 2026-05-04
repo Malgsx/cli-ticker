@@ -17,5 +17,5 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: build/dist/CLITicker.zip
+          files: build/dist/CLITicker.app.tar.gz
           generate_release_notes: true
