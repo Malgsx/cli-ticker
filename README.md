@@ -48,7 +48,7 @@ Reports are written locally:
 
 ## Privacy
 
-The beta stores inventory reports locally only. It shells out to installed local package managers to read versions and update availability. Homebrew auto-update and analytics are disabled for app-launched Homebrew commands.
+CLI Ticker stores inventory reports locally only. It shells out to installed local package managers to read versions and update availability. Homebrew auto-update and analytics are disabled for app-launched Homebrew commands.
 
 No remote account, telemetry endpoint, or server sync is built into this version. Future API adapters should be opt-in and documented clearly.
 
