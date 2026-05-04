@@ -1,0 +1,958 @@
+#import <AppKit/AppKit.h>
+
+static NSString *const StatusCurrent = @"current";
+static NSString *const StatusOutdated = @"outdated";
+static NSString *const StatusUnknown = @"unknown";
+
+static NSString *RunCommand(NSString *launchPath, NSArray<NSString *> *arguments) {
+    NSTask *task = [[NSTask alloc] init];
+    task.launchPath = launchPath;
+    task.arguments = arguments;
+    NSMutableDictionary *environment = [[[NSProcessInfo processInfo] environment] mutableCopy];
+    environment[@"HOMEBREW_NO_AUTO_UPDATE"] = @"1";
+    environment[@"HOMEBREW_NO_ANALYTICS"] = @"1";
+    environment[@"HOMEBREW_NO_INSTALL_CLEANUP"] = @"1";
+    task.environment = environment;
+
+    NSPipe *stdoutPipe = [NSPipe pipe];
+    NSPipe *stderrPipe = [NSPipe pipe];
+    task.standardOutput = stdoutPipe;
+    task.standardError = stderrPipe;
+
+    @try {
+        [task launch];
+        [task waitUntilExit];
+    } @catch (NSException *exception) {
+        return @"";
+    }
+
+    NSData *data = [[stdoutPipe fileHandleForReading] readDataToEndOfFile];
+    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    return text ?: @"";
+}
+
+static NSString *CommandPath(NSString *name) {
+    NSString *script = [NSString stringWithFormat:@"command -v %@", name];
+    NSString *path = RunCommand(@"/usr/bin/env", @[@"zsh", @"-lc", script]);
+    path = [path stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return path.length > 0 ? path : nil;
+}
+
+static NSMutableDictionary *Item(NSString *name, NSString *current, NSString *latest, NSString *source, NSString *path, NSString *status) {
+    NSMutableDictionary *item = [NSMutableDictionary dictionary];
+    item[@"name"] = name ?: @"";
+    item[@"source"] = source ?: @"unknown";
+    item[@"status"] = status ?: StatusUnknown;
+    if (current.length > 0) item[@"currentVersion"] = current;
+    if (latest.length > 0) item[@"latestVersion"] = latest;
+    if (path.length > 0) item[@"path"] = path;
+    return item;
+}
+
+static NSInteger StatusRank(NSString *status) {
+    if ([status isEqualToString:StatusOutdated]) return 0;
+    if ([status isEqualToString:StatusUnknown]) return 1;
+    return 2;
+}
+
+static NSSet<NSString *> *AgentToolNames(void) {
+    static NSSet<NSString *> *names;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        names = [NSSet setWithArray:@[
+            @"agent",
+            @"amp",
+            @"claude",
+            @"codex",
+            @"coderabbit",
+            @"cr",
+            @"cursor",
+            @"cursor-agent",
+            @"droid",
+            @"goose",
+            @"hermes",
+            @"kisuke",
+            @"opencode",
+            @"pi",
+            @"spawn",
+            @"toad"
+        ]];
+    });
+    return names;
+}
+
+static NSArray<NSString *> *PreferredAgentOrder(void) {
+    return @[
+        @"codex",
+        @"claude",
+        @"amp",
+        @"cursor",
+        @"cursor-agent",
+        @"goose",
+        @"opencode",
+        @"coderabbit",
+        @"kisuke",
+        @"droid",
+        @"toad",
+        @"spawn",
+        @"hermes",
+        @"agent",
+        @"cr",
+        @"pi"
+    ];
+}
+
+static NSDictionary<NSString *, NSString *> *PackageAliases(void) {
+    static NSDictionary<NSString *, NSString *> *aliases;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        aliases = @{
+            @"@anthropic-ai/claude-code": @"claude",
+            @"@sourcegraph/amp": @"amp",
+            @"@mariozechner/pi-coding-agent": @"pi",
+            @"block-goose-cli": @"goose",
+            @"kisuke-cli-dev": @"kisuke"
+        };
+    });
+    return aliases;
+}
+
+static NSDictionary<NSString *, NSDictionary *> *AgentBrandMetadata(void) {
+    static NSDictionary<NSString *, NSDictionary *> *metadata;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        metadata = @{
+            @"codex": @{@"label": @"Codex", @"mark": @"CX", @"color": [NSColor colorWithCalibratedRed:0.10 green:0.55 blue:0.42 alpha:1.0]},
+            @"claude": @{@"label": @"Claude", @"mark": @"C", @"color": [NSColor colorWithCalibratedRed:0.78 green:0.34 blue:0.18 alpha:1.0]},
+            @"amp": @{@"label": @"Amp", @"mark": @"A", @"color": [NSColor colorWithCalibratedRed:0.42 green:0.27 blue:0.86 alpha:1.0]},
+            @"cursor": @{@"label": @"Cursor", @"mark": @"⌘", @"color": [NSColor colorWithCalibratedWhite:0.12 alpha:1.0]},
+            @"cursor-agent": @{@"label": @"Cursor Agent", @"mark": @"CA", @"color": [NSColor colorWithCalibratedWhite:0.12 alpha:1.0]},
+            @"goose": @{@"label": @"Goose", @"mark": @"G", @"color": [NSColor colorWithCalibratedRed:0.12 green:0.44 blue:0.82 alpha:1.0]},
+            @"opencode": @{@"label": @"OpenCode", @"mark": @"OC", @"color": [NSColor colorWithCalibratedRed:0.12 green:0.12 blue:0.13 alpha:1.0]},
+            @"coderabbit": @{@"label": @"CodeRabbit", @"mark": @"CR", @"color": [NSColor colorWithCalibratedRed:0.94 green:0.42 blue:0.18 alpha:1.0]},
+            @"kisuke": @{@"label": @"Kisuke", @"mark": @"K", @"color": [NSColor colorWithCalibratedRed:0.83 green:0.66 blue:0.16 alpha:1.0]},
+            @"droid": @{@"label": @"Droid", @"mark": @"D", @"color": [NSColor colorWithCalibratedRed:0.25 green:0.67 blue:0.30 alpha:1.0]},
+            @"toad": @{@"label": @"Toad", @"mark": @"T", @"color": [NSColor colorWithCalibratedRed:0.18 green:0.52 blue:0.25 alpha:1.0]},
+            @"spawn": @{@"label": @"Spawn", @"mark": @"S", @"color": [NSColor colorWithCalibratedRed:0.24 green:0.48 blue:0.72 alpha:1.0]},
+            @"hermes": @{@"label": @"Hermes", @"mark": @"H", @"color": [NSColor colorWithCalibratedRed:0.58 green:0.36 blue:0.18 alpha:1.0]},
+            @"agent": @{@"label": @"Agent", @"mark": @"AI", @"color": [NSColor colorWithCalibratedRed:0.20 green:0.52 blue:0.62 alpha:1.0]},
+            @"cr": @{@"label": @"CR", @"mark": @"CR", @"color": [NSColor colorWithCalibratedRed:0.94 green:0.42 blue:0.18 alpha:1.0]},
+            @"pi": @{@"label": @"Pi", @"mark": @"π", @"color": [NSColor colorWithCalibratedRed:0.34 green:0.34 blue:0.72 alpha:1.0]}
+        };
+    });
+    return metadata;
+}
+
+static NSImage *AgentIcon(NSString *canonicalName) {
+    NSDictionary *logoFiles = @{
+        @"claude": @"anthropic",
+        @"amp": @"sourcegraph",
+        @"coderabbit": @"coderabbit",
+        @"cr": @"coderabbit",
+        @"droid": @"factory",
+        @"hermes": @"nousresearch",
+        @"goose": @"block-goose",
+        @"kisuke": @"kisuke"
+    };
+    NSString *logoName = logoFiles[canonicalName];
+    if (logoName.length > 0) {
+        NSString *resourcePath = [[NSBundle mainBundle] pathForResource:logoName ofType:@"png" inDirectory:@"Logos"];
+        if (resourcePath.length > 0) {
+            NSImage *logo = [[NSImage alloc] initWithContentsOfFile:resourcePath];
+            if (logo) {
+                logo.size = NSMakeSize(18, 18);
+                logo.template = NO;
+                return logo;
+            }
+        }
+    }
+
+    NSDictionary *meta = AgentBrandMetadata()[canonicalName];
+    NSString *mark = meta[@"mark"] ?: [[canonicalName substringToIndex:MIN((NSUInteger)2, canonicalName.length)] uppercaseString];
+    NSColor *color = meta[@"color"] ?: [NSColor systemBlueColor];
+
+    NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(18, 18)];
+    [image lockFocus];
+    NSRect rect = NSMakeRect(1, 1, 16, 16);
+    NSBezierPath *path = [NSBezierPath bezierPathWithRoundedRect:rect xRadius:4 yRadius:4];
+    [color setFill];
+    [path fill];
+
+    NSDictionary *attributes = @{
+        NSFontAttributeName: [NSFont boldSystemFontOfSize:mark.length > 1 ? 7 : 10],
+        NSForegroundColorAttributeName: [NSColor whiteColor]
+    };
+    NSSize textSize = [mark sizeWithAttributes:attributes];
+    NSPoint point = NSMakePoint((18 - textSize.width) / 2.0, (18 - textSize.height) / 2.0 - 0.5);
+    [mark drawAtPoint:point withAttributes:attributes];
+    [image unlockFocus];
+    image.template = NO;
+    return image;
+}
+
+static NSString *EscapedAppleScriptString(NSString *string) {
+    NSMutableString *escaped = [string mutableCopy];
+    [escaped replaceOccurrencesOfString:@"\\" withString:@"\\\\" options:0 range:NSMakeRange(0, escaped.length)];
+    [escaped replaceOccurrencesOfString:@"\"" withString:@"\\\"" options:0 range:NSMakeRange(0, escaped.length)];
+    return escaped;
+}
+
+static BOOL AppExists(NSString *path) {
+    return [[NSFileManager defaultManager] fileExistsAtPath:path];
+}
+
+static NSString *FindApplicationPath(NSArray<NSString *> *appNames) {
+    if (appNames.count == 0) return nil;
+
+    NSArray<NSString *> *roots = @[
+        @"/Applications",
+        [NSHomeDirectory() stringByAppendingPathComponent:@"Applications"]
+    ];
+    for (NSString *root in roots) {
+        for (NSString *name in appNames) {
+            NSString *candidate = [root stringByAppendingPathComponent:name];
+            if (AppExists(candidate)) return candidate;
+        }
+    }
+    return nil;
+}
+
+static NSString *DefaultTerminalName(void) {
+    if (FindApplicationPath(@[@"Ghostty.app"])) return @"Ghostty";
+    if (FindApplicationPath(@[@"iTerm.app", @"iTerm2.app"])) return @"iTerm";
+    if (FindApplicationPath(@[@"Warp.app"])) return @"Warp";
+    return @"Terminal";
+}
+
+@interface InventoryService : NSObject
+- (NSArray<NSMutableDictionary *> *)refresh;
+@end
+
+@implementation InventoryService
+
+- (NSArray<NSMutableDictionary *> *)refresh {
+    NSMutableDictionary<NSString *, NSMutableDictionary *> *merged = [NSMutableDictionary dictionary];
+    NSMutableArray<NSMutableDictionary *> *all = [NSMutableArray array];
+
+    [all addObjectsFromArray:[self pathBinaries]];
+    [all addObjectsFromArray:[self brewItemsWithCasks:NO]];
+    [all addObjectsFromArray:[self brewItemsWithCasks:YES]];
+    [all addObjectsFromArray:[self npmGlobals]];
+    [all addObjectsFromArray:[self bunGlobals]];
+    [all addObjectsFromArray:[self uvTools]];
+
+    for (NSMutableDictionary *item in all) {
+        NSString *key = [NSString stringWithFormat:@"%@:%@", item[@"source"], item[@"name"]];
+        NSMutableDictionary *existing = merged[key];
+        if (!existing) {
+            merged[key] = item;
+            continue;
+        }
+        if (!existing[@"currentVersion"] && item[@"currentVersion"]) existing[@"currentVersion"] = item[@"currentVersion"];
+        if (!existing[@"latestVersion"] && item[@"latestVersion"]) existing[@"latestVersion"] = item[@"latestVersion"];
+        if (!existing[@"path"] && item[@"path"]) existing[@"path"] = item[@"path"];
+        if (![existing[@"status"] isEqualToString:StatusOutdated]) existing[@"status"] = item[@"status"];
+    }
+
+    NSArray *sorted = [merged.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        NSInteger rankA = StatusRank(a[@"status"]);
+        NSInteger rankB = StatusRank(b[@"status"]);
+        if (rankA < rankB) return NSOrderedAscending;
+        if (rankA > rankB) return NSOrderedDescending;
+        return [a[@"name"] localizedCaseInsensitiveCompare:b[@"name"]];
+    }];
+    return sorted;
+}
+
+- (NSArray<NSMutableDictionary *> *)pathBinaries {
+    NSString *script =
+        @"print -rl -- ${(ps.:.)PATH} | while read -r d; do "
+         "case \"$d\" in /usr/bin|/bin|/usr/sbin|/sbin|/System/*|/Library/Apple/*) continue ;; esac; "
+         "[ -d \"$d\" ] && find \"$d\" -maxdepth 1 \\( -type f -o -type l \\) -perm +111 -print 2>/dev/null; "
+         "done | sort -u";
+    NSString *output = RunCommand(@"/usr/bin/env", @[@"zsh", @"-lc", script]);
+    NSMutableArray *items = [NSMutableArray array];
+    for (NSString *line in [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        if (line.length == 0) continue;
+        NSString *name = line.lastPathComponent;
+        if (name.length > 0) [items addObject:Item(name, nil, nil, @"PATH", line, StatusUnknown)];
+    }
+    return items;
+}
+
+- (NSDictionary<NSString *, NSString *> *)brewOutdatedWithCasks:(BOOL)casks brew:(NSString *)brew {
+    NSArray *args = casks ? @[@"outdated", @"--cask", @"--verbose"] : @[@"outdated", @"--formula", @"--verbose"];
+    NSString *output = RunCommand(brew, args);
+    NSMutableDictionary *outdated = [NSMutableDictionary dictionary];
+    for (NSString *line in [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        NSRange range = [line rangeOfString:@"<"];
+        if (range.location == NSNotFound) continue;
+        NSString *left = [[line substringToIndex:range.location] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        NSString *latest = [[line substringFromIndex:range.location + 1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        NSString *name = [left componentsSeparatedByString:@" "].firstObject;
+        if (name.length > 0 && latest.length > 0) outdated[name] = latest;
+    }
+    return outdated;
+}
+
+- (NSArray<NSMutableDictionary *> *)brewItemsWithCasks:(BOOL)casks {
+    NSString *brew = CommandPath(@"brew");
+    if (!brew) return @[];
+
+    NSArray *args = casks ? @[@"list", @"--cask", @"--versions"] : @[@"list", @"--formula", @"--versions"];
+    NSString *output = RunCommand(brew, args);
+    NSDictionary *outdated = [self brewOutdatedWithCasks:casks brew:brew];
+    NSString *source = casks ? @"Homebrew Cask" : @"Homebrew";
+
+    NSMutableArray *items = [NSMutableArray array];
+    for (NSString *line in [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        NSArray *parts = [line componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        NSMutableArray *clean = [NSMutableArray array];
+        for (NSString *part in parts) if (part.length > 0) [clean addObject:part];
+        if (clean.count == 0) continue;
+        NSString *name = clean.firstObject;
+        NSString *current = clean.count > 1 ? [[clean subarrayWithRange:NSMakeRange(1, clean.count - 1)] componentsJoinedByString:@", "] : nil;
+        NSString *latest = outdated[name];
+        [items addObject:Item(name, current, latest, source, nil, latest ? StatusOutdated : StatusCurrent)];
+    }
+    return items;
+}
+
+- (NSDictionary<NSString *, NSString *> *)npmOutdated:(NSString *)npm {
+    NSString *output = RunCommand(npm, @[@"outdated", @"-g", @"--json"]);
+    NSData *data = [output dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data) return @{};
+    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![json isKindOfClass:[NSDictionary class]]) return @{};
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    for (NSString *name in json) {
+        NSDictionary *info = json[name];
+        if ([info isKindOfClass:[NSDictionary class]] && [info[@"latest"] isKindOfClass:[NSString class]]) {
+            result[name] = info[@"latest"];
+        }
+    }
+    return result;
+}
+
+- (NSArray<NSMutableDictionary *> *)npmGlobals {
+    NSString *npm = CommandPath(@"npm");
+    if (!npm) return @[];
+    NSString *output = RunCommand(npm, @[@"ls", @"-g", @"--depth=0", @"--json"]);
+    NSData *data = [output dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    NSDictionary *deps = [json isKindOfClass:[NSDictionary class]] ? json[@"dependencies"] : nil;
+    if (![deps isKindOfClass:[NSDictionary class]]) return @[];
+
+    NSDictionary *outdated = [self npmOutdated:npm];
+    NSMutableArray *items = [NSMutableArray array];
+    for (NSString *name in deps) {
+        NSDictionary *info = deps[name];
+        NSString *current = [info isKindOfClass:[NSDictionary class]] ? info[@"version"] : nil;
+        NSString *latest = outdated[name];
+        [items addObject:Item(name, current, latest, @"npm global", nil, latest ? StatusOutdated : StatusCurrent)];
+    }
+    return items;
+}
+
+- (NSArray<NSMutableDictionary *> *)bunGlobals {
+    NSString *bun = CommandPath(@"bun");
+    if (!bun) return @[];
+    NSString *output = RunCommand(bun, @[@"pm", @"ls", @"-g"]);
+    NSMutableArray *items = [NSMutableArray array];
+    for (NSString *raw in [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        NSString *line = [raw stringByReplacingOccurrencesOfString:@"├── " withString:@""];
+        line = [line stringByReplacingOccurrencesOfString:@"└── " withString:@""];
+        NSRange at = [line rangeOfString:@"@" options:NSBackwardsSearch];
+        if (at.location == NSNotFound || at.location == 0) continue;
+        NSString *name = [line substringToIndex:at.location];
+        NSString *version = [line substringFromIndex:at.location + 1];
+        [items addObject:Item(name, version, nil, @"Bun global", nil, StatusUnknown)];
+    }
+    return items;
+}
+
+- (NSArray<NSMutableDictionary *> *)uvTools {
+    NSString *uv = CommandPath(@"uv");
+    if (!uv) return @[];
+    NSString *output = RunCommand(uv, @[@"tool", @"list"]);
+    NSMutableArray *items = [NSMutableArray array];
+    for (NSString *line in [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        if ([line hasPrefix:@"-"] || ![line containsString:@" v"]) continue;
+        NSArray *parts = [line componentsSeparatedByString:@" "];
+        if (parts.count < 2) continue;
+        NSString *version = [parts[1] stringByReplacingOccurrencesOfString:@"v" withString:@""];
+        [items addObject:Item(parts[0], version, nil, @"uv tool", nil, StatusUnknown)];
+    }
+    return items;
+}
+
+@end
+
+@interface MenuController : NSObject
+@property NSStatusItem *statusItem;
+@property InventoryService *service;
+@property NSArray<NSDictionary *> *items;
+@property BOOL refreshing;
+@property NSURL *reportURL;
+@property NSURL *markdownReportURL;
+@property NSString *preferredTerminal;
+@end
+
+@implementation MenuController
+
+- (instancetype)init {
+    self = [super init];
+    if (!self) return nil;
+
+    self.service = [[InventoryService alloc] init];
+    self.items = @[];
+    NSString *savedTerminal = [[NSUserDefaults standardUserDefaults] stringForKey:@"PreferredTerminal"];
+    self.preferredTerminal = savedTerminal.length > 0 ? savedTerminal : DefaultTerminalName();
+    self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
+    self.statusItem.button.title = @"";
+    self.statusItem.button.toolTip = @"CLI Ticker";
+    NSString *statusIconPath = [[NSBundle mainBundle] pathForResource:@"CLIStatusTemplate" ofType:@"png"];
+    NSImage *statusIcon = statusIconPath ? [[NSImage alloc] initWithContentsOfFile:statusIconPath] : nil;
+    if (statusIcon) {
+        statusIcon.size = NSMakeSize(18, 18);
+        statusIcon.template = YES;
+        self.statusItem.button.image = statusIcon;
+        self.statusItem.button.imagePosition = NSImageLeft;
+    }
+
+    NSURL *support = [[NSFileManager defaultManager] URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+    NSURL *dir = [support URLByAppendingPathComponent:@"CLITicker" isDirectory:YES];
+    [[NSFileManager defaultManager] createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    self.reportURL = [dir URLByAppendingPathComponent:@"inventory.json"];
+    self.markdownReportURL = [dir URLByAppendingPathComponent:@"inventory.md"];
+    [self loadReport];
+    [self rebuildMenu];
+    [self refresh:nil];
+
+    [NSTimer scheduledTimerWithTimeInterval:15 * 60 target:self selector:@selector(refresh:) userInfo:nil repeats:YES];
+    return self;
+}
+
+- (void)loadReport {
+    NSData *data = [NSData dataWithContentsOfURL:self.reportURL];
+    if (!data) return;
+    NSArray *saved = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if ([saved isKindOfClass:[NSArray class]]) self.items = saved;
+}
+
+- (void)saveReport {
+    NSData *data = [NSJSONSerialization dataWithJSONObject:self.items options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
+    [data writeToURL:self.reportURL atomically:YES];
+    [self saveMarkdownReport];
+}
+
+- (NSString *)markdownEscaped:(NSString *)value {
+    NSString *text = value ?: @"";
+    text = [text stringByReplacingOccurrencesOfString:@"|" withString:@"\\|"];
+    text = [text stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+    return text;
+}
+
+- (void)saveMarkdownReport {
+    NSUInteger outdated = 0;
+    NSUInteger unknown = 0;
+    for (NSDictionary *item in self.items) {
+        if ([item[@"status"] isEqualToString:StatusOutdated]) outdated++;
+        if ([item[@"status"] isEqualToString:StatusUnknown]) unknown++;
+    }
+
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    formatter.dateStyle = NSDateFormatterMediumStyle;
+    formatter.timeStyle = NSDateFormatterMediumStyle;
+
+    NSMutableString *markdown = [NSMutableString string];
+    [markdown appendString:@"# CLI Ticker Report\n\n"];
+    [markdown appendFormat:@"Generated: %@\n\n", [formatter stringFromDate:[NSDate date]]];
+    [markdown appendFormat:@"- Total CLIs: %lu\n", self.items.count];
+    [markdown appendFormat:@"- Outdated: %lu\n", outdated];
+    [markdown appendFormat:@"- Unknown/manual: %lu\n\n", unknown];
+
+    NSArray *agents = [self agentTools];
+    if (agents.count > 0) {
+        [markdown appendString:@"## Agent Tools\n\n"];
+        [markdown appendString:@"| Tool | Status | Current | Latest | Source |\n"];
+        [markdown appendString:@"| --- | --- | --- | --- | --- |\n"];
+        for (NSDictionary *item in agents) {
+            NSString *name = [self friendlyAgentName:[self displayNameForItem:item]];
+            [markdown appendFormat:@"| %@ | %@ | %@ | %@ | %@ |\n",
+                [self markdownEscaped:name],
+                [self markdownEscaped:item[@"status"]],
+                [self markdownEscaped:item[@"currentVersion"] ?: @""],
+                [self markdownEscaped:item[@"latestVersion"] ?: @""],
+                [self markdownEscaped:item[@"source"] ?: @""]
+            ];
+        }
+        [markdown appendString:@"\n"];
+    }
+
+    NSArray *updates = [self notableUpdateItemsExcludingAgents:50];
+    if (updates.count > 0) {
+        [markdown appendString:@"## Notable Updates\n\n"];
+        [markdown appendString:@"| CLI | Current | Latest | Source |\n"];
+        [markdown appendString:@"| --- | --- | --- | --- |\n"];
+        for (NSDictionary *item in updates) {
+            [markdown appendFormat:@"| %@ | %@ | %@ | %@ |\n",
+                [self markdownEscaped:item[@"name"] ?: @""],
+                [self markdownEscaped:item[@"currentVersion"] ?: @""],
+                [self markdownEscaped:item[@"latestVersion"] ?: @""],
+                [self markdownEscaped:item[@"source"] ?: @""]
+            ];
+        }
+        [markdown appendString:@"\n"];
+    }
+
+    [markdown appendString:@"## Full Inventory\n\n"];
+    [markdown appendString:@"| CLI | Status | Current | Latest | Source | Path |\n"];
+    [markdown appendString:@"| --- | --- | --- | --- | --- | --- |\n"];
+    for (NSDictionary *item in self.items) {
+        [markdown appendFormat:@"| %@ | %@ | %@ | %@ | %@ | %@ |\n",
+            [self markdownEscaped:item[@"name"] ?: @""],
+            [self markdownEscaped:item[@"status"] ?: @""],
+            [self markdownEscaped:item[@"currentVersion"] ?: @""],
+            [self markdownEscaped:item[@"latestVersion"] ?: @""],
+            [self markdownEscaped:item[@"source"] ?: @""],
+            [self markdownEscaped:item[@"path"] ?: @""]
+        ];
+    }
+
+    [markdown writeToURL:self.markdownReportURL atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
+
+- (NSString *)summaryTitle {
+    if (self.items.count == 0) return @"No scan yet";
+    NSUInteger outdated = 0;
+    NSUInteger unknown = 0;
+    for (NSDictionary *item in self.items) {
+        if ([item[@"status"] isEqualToString:StatusOutdated]) outdated++;
+        if ([item[@"status"] isEqualToString:StatusUnknown]) unknown++;
+    }
+    return [NSString stringWithFormat:@"%lu CLIs scanned, %lu outdated, %lu unknown", self.items.count, outdated, unknown];
+}
+
+- (NSString *)badgeTitle {
+    return @"";
+}
+
+- (NSString *)rowTitle:(NSDictionary *)item {
+    NSString *marker = @"?";
+    if ([item[@"status"] isEqualToString:StatusOutdated]) marker = @"!";
+    if ([item[@"status"] isEqualToString:StatusCurrent]) marker = @"OK";
+    NSString *current = item[@"currentVersion"] ? [NSString stringWithFormat:@" %@", item[@"currentVersion"]] : @"";
+    NSString *latest = item[@"latestVersion"] ? [NSString stringWithFormat:@" -> %@", item[@"latestVersion"]] : @"";
+    return [NSString stringWithFormat:@"%@ %@%@%@ [%@]", marker, item[@"name"], current, latest, item[@"source"]];
+}
+
+- (NSString *)friendlyUpdateTitle:(NSDictionary *)item {
+    NSString *name = item[@"name"] ?: @"Unknown CLI";
+    NSString *source = item[@"source"] ?: @"";
+    NSString *current = item[@"currentVersion"] ?: @"installed";
+    NSString *latest = item[@"latestVersion"];
+
+    if ([item[@"status"] isEqualToString:StatusOutdated] && latest.length > 0) {
+        return [NSString stringWithFormat:@"%@  %@ -> %@  (%@)", name, current, latest, source];
+    }
+    if ([item[@"status"] isEqualToString:StatusCurrent]) {
+        return [NSString stringWithFormat:@"%@  %@  (%@)", name, current, source];
+    }
+    return [NSString stringWithFormat:@"%@  installed  (%@)", name, source];
+}
+
+- (NSString *)displayNameForItem:(NSDictionary *)item {
+    NSString *name = item[@"name"] ?: @"";
+    return PackageAliases()[name] ?: name;
+}
+
+- (NSString *)friendlyAgentName:(NSString *)canonicalName {
+    NSDictionary *meta = AgentBrandMetadata()[canonicalName];
+    return meta[@"label"] ?: canonicalName;
+}
+
+- (NSInteger)sourcePriorityForItem:(NSDictionary *)item canonicalName:(NSString *)canonicalName {
+    NSString *source = item[@"source"] ?: @"";
+    NSString *name = item[@"name"] ?: @"";
+
+    if ([canonicalName isEqualToString:@"claude"] && [name isEqualToString:@"@anthropic-ai/claude-code"]) return 120;
+    if ([canonicalName isEqualToString:@"amp"] && [name isEqualToString:@"@sourcegraph/amp"]) return 120;
+    if ([canonicalName isEqualToString:@"pi"] && [name isEqualToString:@"@mariozechner/pi-coding-agent"]) return 120;
+    if ([canonicalName isEqualToString:@"goose"] && [name isEqualToString:@"block-goose-cli"]) return 115;
+    if ([canonicalName isEqualToString:@"kisuke"] && [name isEqualToString:@"kisuke-cli-dev"]) return 115;
+
+    if ([source isEqualToString:@"Homebrew Cask"]) return 105;
+    if ([source isEqualToString:@"Homebrew"]) return 100;
+    if ([source isEqualToString:@"npm global"]) return 90;
+    if ([source isEqualToString:@"Bun global"]) return 70;
+    if ([source isEqualToString:@"uv tool"]) return 65;
+    if ([source isEqualToString:@"PATH"]) return 20;
+    return 40;
+}
+
+- (NSInteger)agentScoreForItem:(NSDictionary *)item canonicalName:(NSString *)canonicalName {
+    NSInteger score = [self sourcePriorityForItem:item canonicalName:canonicalName];
+    if (item[@"currentVersion"]) score += 20;
+    if (item[@"latestVersion"]) score += 10;
+    if ([item[@"status"] isEqualToString:StatusOutdated]) score += 8;
+    return score;
+}
+
+- (NSArray<NSDictionary *> *)agentTools {
+    NSMutableDictionary<NSString *, NSDictionary *> *byName = [NSMutableDictionary dictionary];
+    for (NSDictionary *item in self.items) {
+        NSString *displayName = [self displayNameForItem:item];
+        if (![AgentToolNames() containsObject:displayName]) continue;
+
+        NSDictionary *existing = byName[displayName];
+        if (!existing) {
+            byName[displayName] = item;
+            continue;
+        }
+
+        NSInteger itemScore = [self agentScoreForItem:item canonicalName:displayName];
+        NSInteger existingScore = [self agentScoreForItem:existing canonicalName:displayName];
+        if (itemScore > existingScore) {
+            byName[displayName] = item;
+        }
+    }
+
+    NSMutableArray *ordered = [NSMutableArray array];
+    for (NSString *name in PreferredAgentOrder()) {
+        NSDictionary *item = byName[name];
+        if (item) [ordered addObject:item];
+    }
+    return ordered;
+}
+
+- (NSString *)agentRowTitle:(NSDictionary *)item {
+    NSString *canonicalName = [self displayNameForItem:item];
+    NSString *label = [self friendlyAgentName:canonicalName];
+    NSString *current = item[@"currentVersion"] ? [NSString stringWithFormat:@" %@", item[@"currentVersion"]] : @"";
+    NSString *source = item[@"source"] ?: @"";
+
+    if ([item[@"status"] isEqualToString:StatusOutdated] && item[@"latestVersion"]) {
+        return [NSString stringWithFormat:@"Open %@%@  update available: %@ -> %@  %@", label, current, item[@"currentVersion"] ?: @"installed", item[@"latestVersion"], source];
+    }
+    if ([item[@"status"] isEqualToString:StatusCurrent]) {
+        return [NSString stringWithFormat:@"Open %@%@  current  %@", label, current, source];
+    }
+    return [NSString stringWithFormat:@"Open %@%@  installed  %@", label, current, source];
+}
+
+- (NSMenuItem *)agentMenuItemForItem:(NSDictionary *)item {
+    NSString *canonicalName = [self displayNameForItem:item];
+    NSMenuItem *row = [[NSMenuItem alloc] initWithTitle:[self agentRowTitle:item] action:@selector(openAgentTool:) keyEquivalent:@""];
+    row.target = self;
+    row.representedObject = item;
+    row.toolTip = item[@"path"];
+    row.image = AgentIcon(canonicalName);
+    return row;
+}
+
+- (NSString *)commandForAgentItem:(NSDictionary *)item {
+    NSString *canonicalName = [self displayNameForItem:item];
+    NSString *path = item[@"path"];
+    if (path.length > 0 && [[NSFileManager defaultManager] isExecutableFileAtPath:path]) return path;
+
+    NSDictionary *commands = @{
+        @"coderabbit": @"coderabbit",
+        @"cursor-agent": @"cursor-agent",
+        @"opencode": @"opencode"
+    };
+    NSString *command = commands[canonicalName] ?: canonicalName;
+    NSString *resolved = CommandPath(command);
+    if (resolved.length > 0) return resolved;
+
+    NSArray *fallbackDirs = @[
+        @"/opt/homebrew/bin",
+        @"/usr/local/bin",
+        [NSHomeDirectory() stringByAppendingPathComponent:@".local/bin"],
+        [NSHomeDirectory() stringByAppendingPathComponent:@".npm-global/bin"],
+        [NSHomeDirectory() stringByAppendingPathComponent:@".bun/bin"],
+        [NSHomeDirectory() stringByAppendingPathComponent:@".claude/local/bin"]
+    ];
+    for (NSString *dir in fallbackDirs) {
+        NSString *candidate = [dir stringByAppendingPathComponent:command];
+        if ([[NSFileManager defaultManager] isExecutableFileAtPath:candidate]) return candidate;
+    }
+
+    return command;
+}
+
+- (NSString *)launchCommandForAgentItem:(NSDictionary *)item {
+    NSString *command = [self commandForAgentItem:item];
+    NSString *label = [self friendlyAgentName:[self displayNameForItem:item]];
+    NSString *escapedCommand = [command stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
+    return [NSString stringWithFormat:@"printf '\\033]0;CLI Ticker - %@\\007'; echo 'Launching %@'; echo; '%@'; echo; echo 'Session finished. Close this window or continue using the shell.'; exec ${SHELL:-/bin/zsh} -l", label, label, escapedCommand];
+}
+
+- (NSArray<NSString *> *)availableTerminals {
+    NSMutableArray *terminals = [NSMutableArray arrayWithObject:@"Terminal"];
+    if (FindApplicationPath(@[@"Ghostty.app"])) [terminals addObject:@"Ghostty"];
+    if (FindApplicationPath(@[@"iTerm.app", @"iTerm2.app"])) [terminals addObject:@"iTerm"];
+    if (FindApplicationPath(@[@"Warp.app"])) [terminals addObject:@"Warp"];
+    return terminals;
+}
+
+- (void)runShellCommand:(NSString *)command inTerminal:(NSString *)terminal {
+    NSString *ghosttyPath = FindApplicationPath(@[@"Ghostty.app"]);
+    if ([terminal isEqualToString:@"Ghostty"] && ghosttyPath.length > 0) {
+        RunCommand(@"/usr/bin/open", @[@"-na", ghosttyPath, @"--args", @"-e", @"/bin/zsh", @"-lc", command]);
+        return;
+    }
+
+    if ([terminal isEqualToString:@"iTerm"] && FindApplicationPath(@[@"iTerm.app", @"iTerm2.app"])) {
+        NSString *script = [NSString stringWithFormat:
+            @"tell application \"iTerm\"\n"
+             "activate\n"
+             "create window with default profile command \"%@\"\n"
+             "end tell",
+            EscapedAppleScriptString(command)
+        ];
+        RunCommand(@"/usr/bin/osascript", @[@"-e", script]);
+        return;
+    }
+
+    if ([terminal isEqualToString:@"Warp"] && FindApplicationPath(@[@"Warp.app"])) {
+        RunCommand(@"/usr/bin/open", @[@"-a", @"Warp"]);
+        NSString *script = [NSString stringWithFormat:
+            @"tell application \"System Events\"\n"
+             "keystroke \"%@\"\n"
+             "key code 36\n"
+             "end tell",
+            EscapedAppleScriptString(command)
+        ];
+        RunCommand(@"/usr/bin/osascript", @[@"-e", script]);
+        return;
+    }
+
+    NSString *script = [NSString stringWithFormat:
+        @"tell application \"Terminal\"\n"
+         "activate\n"
+         "do script \"%@\"\n"
+         "end tell",
+        EscapedAppleScriptString(command)
+    ];
+    RunCommand(@"/usr/bin/osascript", @[@"-e", script]);
+}
+
+- (void)addSectionTitle:(NSString *)title toMenu:(NSMenu *)menu {
+    NSMenuItem *section = [[NSMenuItem alloc] initWithTitle:title action:nil keyEquivalent:@""];
+    section.enabled = NO;
+    [menu addItem:section];
+}
+
+- (NSArray<NSDictionary *> *)notableUpdateItemsExcludingAgents:(NSUInteger)limit {
+    NSMutableArray *updates = [NSMutableArray array];
+    for (NSDictionary *item in self.items) {
+        NSString *displayName = [self displayNameForItem:item];
+        if ([AgentToolNames() containsObject:displayName]) continue;
+        if (![item[@"status"] isEqualToString:StatusOutdated]) continue;
+        [updates addObject:item];
+        if (updates.count >= limit) break;
+    }
+    return updates;
+}
+
+- (NSMenuItem *)notableUpdateMenuItemForItem:(NSDictionary *)item {
+    NSMenuItem *row = [[NSMenuItem alloc] initWithTitle:[self friendlyUpdateTitle:item] action:nil keyEquivalent:@""];
+    row.toolTip = item[@"path"];
+    row.image = [NSImage imageWithSystemSymbolName:@"arrow.triangle.2.circlepath" accessibilityDescription:@"Update available"];
+    return row;
+}
+
+- (NSUInteger)outdatedCountExcludingAgents {
+    NSUInteger count = 0;
+    for (NSDictionary *item in self.items) {
+        NSString *displayName = [self displayNameForItem:item];
+        if ([AgentToolNames() containsObject:displayName]) continue;
+        if ([item[@"status"] isEqualToString:StatusOutdated]) count++;
+    }
+    return count;
+}
+
+- (NSMenuItem *)terminalPreferenceMenuItem {
+    NSMenuItem *folder = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Preferred Terminal: %@", self.preferredTerminal] action:nil keyEquivalent:@""];
+    folder.image = [NSImage imageWithSystemSymbolName:@"terminal" accessibilityDescription:@"Preferred Terminal"];
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Preferred Terminal"];
+
+    for (NSString *terminal in [self availableTerminals]) {
+        NSString *title = [terminal isEqualToString:self.preferredTerminal] ? [NSString stringWithFormat:@"%@ selected", terminal] : terminal;
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:@selector(selectTerminal:) keyEquivalent:@""];
+        item.target = self;
+        item.representedObject = terminal;
+        item.state = [terminal isEqualToString:self.preferredTerminal] ? NSControlStateValueOn : NSControlStateValueOff;
+        [menu addItem:item];
+    }
+
+    folder.submenu = menu;
+    return folder;
+}
+
+- (NSMenuItem *)reportMenuItem {
+    NSMenuItem *folder = [[NSMenuItem alloc] initWithTitle:@"Open Report" action:nil keyEquivalent:@""];
+    folder.image = [NSImage imageWithSystemSymbolName:@"doc.text" accessibilityDescription:@"Open Report"];
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Open Report"];
+
+    NSMenuItem *json = [[NSMenuItem alloc] initWithTitle:@"JSON Report" action:@selector(openJSONReport:) keyEquivalent:@"j"];
+    json.target = self;
+    json.image = [NSImage imageWithSystemSymbolName:@"curlybraces" accessibilityDescription:@"JSON Report"];
+    [menu addItem:json];
+
+    NSMenuItem *markdown = [[NSMenuItem alloc] initWithTitle:@"Markdown Report" action:@selector(openMarkdownReport:) keyEquivalent:@"m"];
+    markdown.target = self;
+    markdown.image = [NSImage imageWithSystemSymbolName:@"doc.plaintext" accessibilityDescription:@"Markdown Report"];
+    [menu addItem:markdown];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *note = [[NSMenuItem alloc] initWithTitle:@"Markdown is generated from the latest scan" action:nil keyEquivalent:@""];
+    note.enabled = NO;
+    [menu addItem:note];
+
+    folder.submenu = menu;
+    return folder;
+}
+
+- (void)rebuildMenu {
+    NSMenu *menu = [[NSMenu alloc] init];
+    NSMenuItem *summary = [[NSMenuItem alloc] initWithTitle:[self summaryTitle] action:nil keyEquivalent:@""];
+    summary.enabled = NO;
+    [menu addItem:summary];
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSArray *agents = [self agentTools];
+    if (agents.count > 0) {
+        NSMenuItem *agentFolder = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Agent Tools  %lu", agents.count] action:nil keyEquivalent:@""];
+        agentFolder.image = [NSImage imageWithSystemSymbolName:@"folder" accessibilityDescription:@"Agent Tools"];
+        NSMenu *agentMenu = [[NSMenu alloc] initWithTitle:@"Agent Tools"];
+        NSMenuItem *folderSummary = [[NSMenuItem alloc] initWithTitle:@"Installed agent CLIs" action:nil keyEquivalent:@""];
+        folderSummary.enabled = NO;
+        [agentMenu addItem:folderSummary];
+        [agentMenu addItem:[NSMenuItem separatorItem]];
+        for (NSDictionary *item in agents) {
+            [agentMenu addItem:[self agentMenuItemForItem:item]];
+        }
+        [agentMenu addItem:[NSMenuItem separatorItem]];
+        NSMenuItem *agentNote = [[NSMenuItem alloc] initWithTitle:@"Full details are saved in the JSON report" action:nil keyEquivalent:@""];
+        agentNote.enabled = NO;
+        [agentMenu addItem:agentNote];
+        agentFolder.submenu = agentMenu;
+        [menu addItem:agentFolder];
+        [menu addItem:[NSMenuItem separatorItem]];
+    }
+
+    NSArray *notableUpdates = [self notableUpdateItemsExcludingAgents:14];
+    if (notableUpdates.count > 0) {
+        NSUInteger totalUpdates = [self outdatedCountExcludingAgents];
+        NSMenuItem *updatesFolder = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Updates Available  %lu", totalUpdates] action:nil keyEquivalent:@""];
+        updatesFolder.image = [NSImage imageWithSystemSymbolName:@"arrow.down.circle" accessibilityDescription:@"Notable Updates"];
+        NSMenu *updatesMenu = [[NSMenu alloc] initWithTitle:@"Notable Updates"];
+        NSMenuItem *updatesSummary = [[NSMenuItem alloc] initWithTitle:@"Newest versions found" action:nil keyEquivalent:@""];
+        updatesSummary.enabled = NO;
+        [updatesMenu addItem:updatesSummary];
+        [updatesMenu addItem:[NSMenuItem separatorItem]];
+        for (NSDictionary *item in notableUpdates) {
+            [updatesMenu addItem:[self notableUpdateMenuItemForItem:item]];
+        }
+        [updatesMenu addItem:[NSMenuItem separatorItem]];
+        NSString *noteText = totalUpdates > notableUpdates.count
+            ? [NSString stringWithFormat:@"Showing %lu of %lu updates", notableUpdates.count, totalUpdates]
+            : @"Use each package manager to update";
+        NSMenuItem *updatesNote = [[NSMenuItem alloc] initWithTitle:noteText action:nil keyEquivalent:@""];
+        updatesNote.enabled = NO;
+        [updatesMenu addItem:updatesNote];
+        updatesFolder.submenu = updatesMenu;
+        [menu addItem:updatesFolder];
+        [menu addItem:[NSMenuItem separatorItem]];
+    }
+
+    NSUInteger shown = agents.count + notableUpdates.count;
+    if (self.items.count > shown) {
+        NSMenuItem *overflow = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"%lu more saved in report", self.items.count - shown] action:nil keyEquivalent:@""];
+        overflow.enabled = NO;
+        [menu addItem:overflow];
+    }
+
+    [menu addItem:[NSMenuItem separatorItem]];
+    [menu addItem:[self terminalPreferenceMenuItem]];
+    NSMenuItem *refresh = [[NSMenuItem alloc] initWithTitle:self.refreshing ? @"Refreshing..." : @"Refresh Now" action:@selector(refresh:) keyEquivalent:@"r"];
+    refresh.target = self;
+    [menu addItem:refresh];
+    [menu addItem:[self reportMenuItem]];
+    [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *quit = [[NSMenuItem alloc] initWithTitle:@"Quit" action:@selector(quit:) keyEquivalent:@"q"];
+    quit.target = self;
+    [menu addItem:quit];
+
+    self.statusItem.menu = menu;
+    self.statusItem.button.title = [self badgeTitle];
+}
+
+- (void)refresh:(id)sender {
+    if (self.refreshing) return;
+    self.refreshing = YES;
+    [self rebuildMenu];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSArray *fresh = [self.service refresh];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.items = fresh;
+            [self saveReport];
+            self.refreshing = NO;
+            [self rebuildMenu];
+        });
+    });
+}
+
+- (void)selectTerminal:(NSMenuItem *)sender {
+    NSString *terminal = sender.representedObject;
+    if (terminal.length == 0) return;
+    self.preferredTerminal = terminal;
+    [[NSUserDefaults standardUserDefaults] setObject:terminal forKey:@"PreferredTerminal"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    [self rebuildMenu];
+}
+
+- (void)openAgentTool:(NSMenuItem *)sender {
+    NSDictionary *item = sender.representedObject;
+    if (![item isKindOfClass:[NSDictionary class]]) return;
+    NSString *command = [self launchCommandForAgentItem:item];
+    [self runShellCommand:command inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
+}
+
+- (void)openJSONReport:(id)sender {
+    [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[self.reportURL]];
+}
+
+- (void)openMarkdownReport:(id)sender {
+    [self saveMarkdownReport];
+    [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[self.markdownReportURL]];
+}
+
+- (void)quit:(id)sender {
+    [NSApp terminate:nil];
+}
+
+@end
+
+@interface AppDelegate : NSObject <NSApplicationDelegate>
+@property MenuController *menuController;
+@end
+
+@implementation AppDelegate
+- (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    self.menuController = [[MenuController alloc] init];
+}
+@end
+
+int main(int argc, const char *argv[]) {
+    @autoreleasepool {
+        NSApplication *app = [NSApplication sharedApplication];
+        AppDelegate *delegate = [[AppDelegate alloc] init];
+        app.delegate = delegate;
+        [app run];
+    }
+    return 0;
+}
