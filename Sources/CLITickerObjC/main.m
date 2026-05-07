@@ -511,7 +511,7 @@ static NSString *DefaultTerminalName(void) {
         [markdown appendString:@"\n"];
     }
 
-    NSArray *updates = [self notableUpdateItemsExcludingAgents:50];
+    NSArray *updates = [self notableUpdateItems:50];
     if (updates.count > 0) {
         [markdown appendString:@"## Notable Updates\n\n"];
         [markdown appendString:@"| CLI | Current | Latest | Source |\n"];
@@ -569,13 +569,14 @@ static NSString *DefaultTerminalName(void) {
 }
 
 - (NSString *)friendlyUpdateTitle:(NSDictionary *)item {
-    NSString *name = item[@"name"] ?: @"Unknown CLI";
+    NSString *name = [self titleNameForItem:item];
+    if (name.length == 0) name = @"Unknown CLI";
     NSString *source = item[@"source"] ?: @"";
     NSString *current = item[@"currentVersion"] ?: @"installed";
     NSString *latest = item[@"latestVersion"];
 
     if ([item[@"status"] isEqualToString:StatusOutdated] && latest.length > 0) {
-        return [NSString stringWithFormat:@"%@  %@ -> %@  (%@)", name, current, latest, source];
+        return [NSString stringWithFormat:@"%@  %@ → %@  (%@)", name, current, latest, source];
     }
     if ([item[@"status"] isEqualToString:StatusCurrent]) {
         return [NSString stringWithFormat:@"%@  %@  (%@)", name, current, source];
@@ -672,8 +673,8 @@ static NSString *DefaultTerminalName(void) {
     NSDictionary *item = items[row];
     NSString *identifier = tableColumn.identifier;
 
-    if ([identifier isEqualToString:@"tool"]) return item[@"name"] ?: @"";
-    if ([identifier isEqualToString:@"version"]) return item[@"currentVersion"] ?: @"installed";
+    if ([identifier isEqualToString:@"tool"]) return [self titleNameForItem:item];
+    if ([identifier isEqualToString:@"version"]) return [self versionSummaryForItem:item];
     if ([identifier isEqualToString:@"current"]) return item[@"currentVersion"] ?: @"installed";
     if ([identifier isEqualToString:@"latest"]) return item[@"latestVersion"] ?: @"";
     if ([identifier isEqualToString:@"source"]) return item[@"source"] ?: @"";
@@ -719,7 +720,7 @@ static NSString *DefaultTerminalName(void) {
 - (void)reloadAllUpdatesDialog {
     if (!self.allUpdatesTableView) return;
 
-    NSArray<NSDictionary *> *updates = [self notableUpdateItemsExcludingAgents:NSUIntegerMax];
+    NSArray<NSDictionary *> *updates = [self notableUpdateItems:NSUIntegerMax];
     self.allUpdateItems = updates;
     [self.allUpdatesTableView reloadData];
     self.allUpdatesAlert.messageText = [NSString stringWithFormat:@"All Updates Available (%lu)", updates.count];
@@ -762,6 +763,22 @@ static NSString *DefaultTerminalName(void) {
 - (NSString *)displayNameForItem:(NSDictionary *)item {
     NSString *name = item[@"name"] ?: @"";
     return PackageAliases()[name] ?: name;
+}
+
+- (NSString *)titleNameForItem:(NSDictionary *)item {
+    NSString *displayName = [self displayNameForItem:item];
+    if ([AgentToolNames() containsObject:displayName]) return [self friendlyAgentName:displayName];
+    return item[@"name"] ?: @"";
+}
+
+- (NSString *)versionSummaryForItem:(NSDictionary *)item {
+    NSString *current = item[@"currentVersion"] ?: @"installed";
+    NSString *latest = item[@"latestVersion"];
+    if ([item[@"status"] isEqualToString:StatusOutdated] && latest.length > 0) {
+        return [NSString stringWithFormat:@"%@ → %@", current, latest];
+    }
+    if ([item[@"status"] isEqualToString:StatusCurrent]) return current;
+    return current;
 }
 
 - (NSString *)friendlyAgentName:(NSString *)canonicalName {
@@ -826,16 +843,14 @@ static NSString *DefaultTerminalName(void) {
 - (NSString *)agentRowTitle:(NSDictionary *)item {
     NSString *canonicalName = [self displayNameForItem:item];
     NSString *label = [self friendlyAgentName:canonicalName];
-    NSString *current = item[@"currentVersion"] ? [NSString stringWithFormat:@" %@", item[@"currentVersion"]] : @"";
-    NSString *source = item[@"source"] ?: @"";
 
     if ([item[@"status"] isEqualToString:StatusOutdated] && item[@"latestVersion"]) {
-        return [NSString stringWithFormat:@"Open %@%@  update available: %@ -> %@  %@", label, current, item[@"currentVersion"] ?: @"installed", item[@"latestVersion"], source];
+        return [NSString stringWithFormat:@"%@  %@", label, [self versionSummaryForItem:item]];
     }
     if ([item[@"status"] isEqualToString:StatusCurrent]) {
-        return [NSString stringWithFormat:@"Open %@%@  current  %@", label, current, source];
+        return [NSString stringWithFormat:@"%@  %@", label, [self versionSummaryForItem:item]];
     }
-    return [NSString stringWithFormat:@"Open %@%@  installed  %@", label, current, source];
+    return [NSString stringWithFormat:@"%@  installed", label];
 }
 
 - (NSMenuItem *)agentMenuItemForItem:(NSDictionary *)item {
@@ -1002,11 +1017,9 @@ static NSString *DefaultTerminalName(void) {
     return summary;
 }
 
-- (NSArray<NSDictionary *> *)notableUpdateItemsExcludingAgents:(NSUInteger)limit {
+- (NSArray<NSDictionary *> *)notableUpdateItems:(NSUInteger)limit {
     NSMutableArray *updates = [NSMutableArray array];
     for (NSDictionary *item in self.items) {
-        NSString *displayName = [self displayNameForItem:item];
-        if ([AgentToolNames() containsObject:displayName]) continue;
         if (![item[@"status"] isEqualToString:StatusOutdated]) continue;
         [updates addObject:item];
         if (updates.count >= limit) break;
@@ -1023,11 +1036,9 @@ static NSString *DefaultTerminalName(void) {
     return row;
 }
 
-- (NSUInteger)outdatedCountExcludingAgents {
+- (NSUInteger)outdatedCount {
     NSUInteger count = 0;
     for (NSDictionary *item in self.items) {
-        NSString *displayName = [self displayNameForItem:item];
-        if ([AgentToolNames() containsObject:displayName]) continue;
         if ([item[@"status"] isEqualToString:StatusOutdated]) count++;
     }
     return count;
@@ -1101,9 +1112,9 @@ static NSString *DefaultTerminalName(void) {
         [menu addItem:[NSMenuItem separatorItem]];
     }
 
-    NSArray *notableUpdates = [self notableUpdateItemsExcludingAgents:14];
+    NSArray *notableUpdates = [self notableUpdateItems:14];
     if (notableUpdates.count > 0) {
-        NSUInteger totalUpdates = [self outdatedCountExcludingAgents];
+        NSUInteger totalUpdates = [self outdatedCount];
         NSMenuItem *updatesFolder = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Updates Available  %lu", totalUpdates] action:nil keyEquivalent:@""];
         updatesFolder.image = [NSImage imageWithSystemSymbolName:@"arrow.down.circle" accessibilityDescription:@"Notable Updates"];
         NSMenu *updatesMenu = [[NSMenu alloc] initWithTitle:@"Notable Updates"];
@@ -1285,7 +1296,7 @@ static NSString *DefaultTerminalName(void) {
 }
 
 - (void)showAllUpdates:(id)sender {
-    NSArray<NSDictionary *> *updates = [self notableUpdateItemsExcludingAgents:NSUIntegerMax];
+    NSArray<NSDictionary *> *updates = [self notableUpdateItems:NSUIntegerMax];
     if (updates.count == 0) return;
     self.allUpdateItems = updates;
 
