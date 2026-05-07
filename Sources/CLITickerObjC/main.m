@@ -562,6 +562,74 @@ static NSString *DefaultTerminalName(void) {
     return [NSString stringWithFormat:@"%@  installed  (%@)", name, source];
 }
 
+- (NSArray<NSDictionary *> *)searchItemsMatching:(NSString *)query limit:(NSUInteger)limit {
+    NSString *trimmed = [query stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length == 0) return @[];
+
+    NSArray<NSString *> *terms = [[trimmed lowercaseString] componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    NSMutableArray *matches = [NSMutableArray array];
+    for (NSDictionary *item in self.items) {
+        NSMutableArray *parts = [NSMutableArray array];
+        for (NSString *key in @[@"name", @"source", @"status", @"currentVersion", @"latestVersion", @"path"]) {
+            NSString *value = item[key];
+            if ([value isKindOfClass:[NSString class]] && value.length > 0) [parts addObject:value];
+        }
+        NSString *haystack = [[parts componentsJoinedByString:@" "] lowercaseString];
+        BOOL matched = YES;
+        for (NSString *term in terms) {
+            if (term.length == 0) continue;
+            if ([haystack rangeOfString:term].location == NSNotFound) {
+                matched = NO;
+                break;
+            }
+        }
+        if (!matched) continue;
+        [matches addObject:item];
+        if (matches.count >= limit) break;
+    }
+    return matches;
+}
+
+- (NSString *)searchResultsTextForQuery:(NSString *)query {
+    NSArray<NSDictionary *> *matches = [self searchItemsMatching:query limit:40];
+    if (matches.count == 0) return @"No matching CLIs found.";
+
+    NSMutableString *text = [NSMutableString string];
+    for (NSDictionary *item in matches) {
+        [text appendFormat:@"%@\n", [self rowTitle:item]];
+        NSString *path = item[@"path"];
+        if (path.length > 0) [text appendFormat:@"  %@\n", path];
+    }
+    return text;
+}
+
+- (NSString *)updateCommandForItem:(NSDictionary *)item {
+    NSString *source = item[@"source"] ?: @"";
+    NSString *name = item[@"name"] ?: @"";
+    if (name.length == 0) return nil;
+
+    if ([source isEqualToString:@"Homebrew"]) {
+        return [NSString stringWithFormat:@"brew upgrade %@", name];
+    }
+    if ([source isEqualToString:@"Homebrew Cask"]) {
+        return [NSString stringWithFormat:@"brew upgrade --cask %@", name];
+    }
+    if ([source isEqualToString:@"npm global"]) {
+        return [NSString stringWithFormat:@"npm install -g %@", name];
+    }
+    return nil;
+}
+
+- (NSString *)updateTerminalCommandForItem:(NSDictionary *)item {
+    NSString *command = [self updateCommandForItem:item];
+    if (command.length == 0) return nil;
+
+    NSString *title = [NSString stringWithFormat:@"CLI Ticker - Update %@", item[@"name"] ?: @"CLI"];
+    NSString *escapedCommand = [command stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
+    NSString *escapedTitle = [title stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
+    return [NSString stringWithFormat:@"printf '\\033]0;%@\\007'; echo 'Running %@'; echo; %@; status=$?; echo; echo \"Update finished with exit code $status.\"; echo 'Press Return to close this session.'; read _; exec ${SHELL:-/bin/zsh} -l", escapedTitle, escapedCommand, command];
+}
+
 - (NSString *)displayNameForItem:(NSDictionary *)item {
     NSString *name = item[@"name"] ?: @"";
     return PackageAliases()[name] ?: name;
@@ -757,7 +825,9 @@ static NSString *DefaultTerminalName(void) {
 }
 
 - (NSMenuItem *)notableUpdateMenuItemForItem:(NSDictionary *)item {
-    NSMenuItem *row = [[NSMenuItem alloc] initWithTitle:[self friendlyUpdateTitle:item] action:nil keyEquivalent:@""];
+    NSMenuItem *row = [[NSMenuItem alloc] initWithTitle:[self friendlyUpdateTitle:item] action:@selector(applyUpdate:) keyEquivalent:@""];
+    row.target = self;
+    row.representedObject = item;
     row.toolTip = item[@"path"];
     row.image = [NSImage imageWithSystemSymbolName:@"arrow.triangle.2.circlepath" accessibilityDescription:@"Update available"];
     return row;
@@ -859,7 +929,7 @@ static NSString *DefaultTerminalName(void) {
         [updatesMenu addItem:[NSMenuItem separatorItem]];
         NSString *noteText = totalUpdates > notableUpdates.count
             ? [NSString stringWithFormat:@"Showing %lu of %lu updates", notableUpdates.count, totalUpdates]
-            : @"Use each package manager to update";
+            : @"Click an update to apply it";
         NSMenuItem *updatesNote = [[NSMenuItem alloc] initWithTitle:noteText action:nil keyEquivalent:@""];
         updatesNote.enabled = NO;
         [updatesMenu addItem:updatesNote];
@@ -877,6 +947,10 @@ static NSString *DefaultTerminalName(void) {
 
     [menu addItem:[NSMenuItem separatorItem]];
     [menu addItem:[self terminalPreferenceMenuItem]];
+    NSMenuItem *search = [[NSMenuItem alloc] initWithTitle:@"Search CLIs" action:@selector(searchCLIs:) keyEquivalent:@"f"];
+    search.target = self;
+    search.image = [NSImage imageWithSystemSymbolName:@"magnifyingglass" accessibilityDescription:@"Search CLIs"];
+    [menu addItem:search];
     NSMenuItem *refresh = [[NSMenuItem alloc] initWithTitle:self.refreshing ? @"Refreshing..." : @"Refresh Now" action:@selector(refresh:) keyEquivalent:@"r"];
     refresh.target = self;
     [menu addItem:refresh];
@@ -919,6 +993,53 @@ static NSString *DefaultTerminalName(void) {
     if (![item isKindOfClass:[NSDictionary class]]) return;
     NSString *command = [self launchCommandForAgentItem:item];
     [self runShellCommand:command inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
+}
+
+- (void)searchCLIs:(id)sender {
+    NSAlert *prompt = [[NSAlert alloc] init];
+    prompt.messageText = @"Search CLIs";
+    prompt.informativeText = @"Search installed command names, sources, versions, statuses, and paths.";
+    [prompt addButtonWithTitle:@"Search"];
+    [prompt addButtonWithTitle:@"Cancel"];
+
+    NSSearchField *field = [[NSSearchField alloc] initWithFrame:NSMakeRect(0, 0, 360, 26)];
+    field.placeholderString = @"codex, npm, outdated, /opt/homebrew...";
+    prompt.accessoryView = field;
+
+    NSModalResponse response = [prompt runModal];
+    if (response != NSAlertFirstButtonReturn) return;
+
+    NSString *query = field.stringValue ?: @"";
+    NSAlert *results = [[NSAlert alloc] init];
+    results.messageText = [NSString stringWithFormat:@"Search Results for \"%@\"", query];
+    results.informativeText = [self searchResultsTextForQuery:query];
+    [results addButtonWithTitle:@"Done"];
+    [results runModal];
+}
+
+- (void)applyUpdate:(NSMenuItem *)sender {
+    NSDictionary *item = sender.representedObject;
+    if (![item isKindOfClass:[NSDictionary class]]) return;
+
+    NSString *command = [self updateCommandForItem:item];
+    if (command.length == 0) {
+        NSAlert *unsupported = [[NSAlert alloc] init];
+        unsupported.messageText = @"Update Not Supported";
+        unsupported.informativeText = @"CLI Ticker can apply Homebrew and global npm updates from the menu. Use the package manager directly for this source.";
+        [unsupported addButtonWithTitle:@"OK"];
+        [unsupported runModal];
+        return;
+    }
+
+    NSAlert *confirm = [[NSAlert alloc] init];
+    confirm.messageText = [NSString stringWithFormat:@"Update %@?", item[@"name"] ?: @"this CLI"];
+    confirm.informativeText = [NSString stringWithFormat:@"CLI Ticker will open %@ and run:\n\n%@", self.preferredTerminal ?: DefaultTerminalName(), command];
+    [confirm addButtonWithTitle:@"Update"];
+    [confirm addButtonWithTitle:@"Cancel"];
+    if ([confirm runModal] != NSAlertFirstButtonReturn) return;
+
+    NSString *terminalCommand = [self updateTerminalCommandForItem:item];
+    [self runShellCommand:terminalCommand inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
 }
 
 - (void)openJSONReport:(id)sender {

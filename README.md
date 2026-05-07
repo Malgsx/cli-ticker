@@ -25,7 +25,8 @@ open "$HOME/Applications/CLITicker.app"
 
 - Icon-only menu bar app.
 - `Agent Tools` submenu for tools like Codex, Claude, Amp, Cursor, Goose, OpenCode, CodeRabbit, Kisuke, Droid, and related CLIs.
-- `Updates Available` submenu with readable version changes.
+- `Search CLIs` opens a native search panel for installed tools.
+- `Updates Available` submenu with readable version changes and clickable update actions.
 - Clickable agent tools that open the selected CLI in the user's preferred terminal.
 - `Open Report` submenu for JSON or Markdown inventory reports.
 - `Preferred Terminal` submenu with Terminal, Ghostty, iTerm, or Warp when installed.
@@ -110,7 +111,6 @@ Forks can change known agent tools, package-manager scanners, branding, reports,
 - Notarize the app archive or DMG.
 - Add a first-run explanation of what is scanned and where reports are saved.
 - Add an explicit opt-in before adding remote announcement/update APIs.
-- Decide whether update actions should be read-only recommendations or one-click package-manager updates.
 
 ## API Adapter Plan
 
