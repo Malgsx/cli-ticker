@@ -145,14 +145,19 @@ static NSDictionary<NSString *, NSDictionary *> *AgentBrandMetadata(void) {
 
 static NSImage *AgentIcon(NSString *canonicalName) {
     NSDictionary *logoFiles = @{
+        @"codex": @"codex",
         @"claude": @"anthropic",
         @"amp": @"sourcegraph",
+        @"cursor": @"cursor",
+        @"cursor-agent": @"cursor",
         @"coderabbit": @"coderabbit",
         @"cr": @"coderabbit",
-        @"droid": @"factory",
+        @"droid": @"droid",
         @"hermes": @"nousresearch",
         @"goose": @"block-goose",
-        @"kisuke": @"kisuke"
+        @"kisuke": @"kisuke",
+        @"toad": @"toad",
+        @"spawn": @"spawn"
     };
     NSString *logoName = logoFiles[canonicalName];
     if (logoName.length > 0) {
