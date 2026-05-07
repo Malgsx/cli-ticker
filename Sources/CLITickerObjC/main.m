@@ -409,6 +409,8 @@ static NSString *DefaultTerminalName(void) {
 @property NSDate *lastHandledUpdateRefreshDate;
 @property NSString *preferredTerminal;
 @property NSArray<NSDictionary *> *allUpdateItems;
+@property NSTableView *allUpdatesTableView;
+@property NSAlert *allUpdatesAlert;
 @end
 
 @implementation MenuController
@@ -446,7 +448,7 @@ static NSString *DefaultTerminalName(void) {
     [self refresh:nil];
 
     [NSTimer scheduledTimerWithTimeInterval:15 * 60 target:self selector:@selector(refresh:) userInfo:nil repeats:YES];
-    [NSTimer scheduledTimerWithTimeInterval:5 target:self selector:@selector(checkForUpdateRefreshRequest:) userInfo:nil repeats:YES];
+    [NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(checkForUpdateRefreshRequest:) userInfo:nil repeats:YES];
     return self;
 }
 
@@ -667,6 +669,18 @@ static NSString *DefaultTerminalName(void) {
 
     NSString *terminalCommand = [self updateTerminalCommandForItem:item];
     [self runShellCommand:terminalCommand inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
+}
+
+- (void)reloadAllUpdatesDialog {
+    if (!self.allUpdatesTableView) return;
+
+    NSArray<NSDictionary *> *updates = [self notableUpdateItemsExcludingAgents:NSUIntegerMax];
+    self.allUpdateItems = updates;
+    [self.allUpdatesTableView reloadData];
+    self.allUpdatesAlert.messageText = [NSString stringWithFormat:@"All Updates Available (%lu)", updates.count];
+    self.allUpdatesAlert.informativeText = updates.count > 0
+        ? [NSString stringWithFormat:@"Double-click an update to run it in %@.", self.preferredTerminal ?: DefaultTerminalName()]
+        : @"All visible updates are current.";
 }
 
 - (NSString *)updateCommandForItem:(NSDictionary *)item {
@@ -1087,6 +1101,7 @@ static NSString *DefaultTerminalName(void) {
             [self saveReport];
             self.refreshing = NO;
             [self rebuildMenu];
+            [self reloadAllUpdatesDialog];
         });
     });
 }
@@ -1164,16 +1179,20 @@ static NSString *DefaultTerminalName(void) {
     [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"source" title:@"Source" width:120]];
     [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"command" title:@"Command" width:285]];
     scrollView.documentView = tableView;
+    self.allUpdatesTableView = tableView;
 
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = [NSString stringWithFormat:@"All Updates Available (%lu)", updates.count];
     alert.informativeText = [NSString stringWithFormat:@"Double-click an update to run it in %@.", self.preferredTerminal ?: DefaultTerminalName()];
     alert.accessoryView = scrollView;
+    self.allUpdatesAlert = alert;
     [alert addButtonWithTitle:@"Done"];
     [alert addButtonWithTitle:@"Open Markdown Report"];
     if ([alert runModal] == NSAlertSecondButtonReturn) {
         [self openMarkdownReport:nil];
     }
+    self.allUpdatesAlert = nil;
+    self.allUpdatesTableView = nil;
     self.allUpdateItems = nil;
 }
 
