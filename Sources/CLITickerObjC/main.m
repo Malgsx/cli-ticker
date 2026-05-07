@@ -408,6 +408,7 @@ static NSString *DefaultTerminalName(void) {
 @property NSURL *updateRefreshRequestURL;
 @property NSDate *lastHandledUpdateRefreshDate;
 @property NSString *preferredTerminal;
+@property NSArray<NSDictionary *> *allUpdateItems;
 @end
 
 @implementation MenuController
@@ -617,6 +618,55 @@ static NSString *DefaultTerminalName(void) {
         if (path.length > 0) [text appendFormat:@"  %@\n", path];
     }
     return text;
+}
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
+    return self.allUpdateItems.count;
+}
+
+- (id)tableView:(NSTableView *)tableView objectValueForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)self.allUpdateItems.count) return @"";
+    NSDictionary *item = self.allUpdateItems[row];
+    NSString *identifier = tableColumn.identifier;
+
+    if ([identifier isEqualToString:@"tool"]) return item[@"name"] ?: @"";
+    if ([identifier isEqualToString:@"current"]) return item[@"currentVersion"] ?: @"installed";
+    if ([identifier isEqualToString:@"latest"]) return item[@"latestVersion"] ?: @"";
+    if ([identifier isEqualToString:@"source"]) return item[@"source"] ?: @"";
+    if ([identifier isEqualToString:@"command"]) return [self updateCommandForItem:item] ?: @"Manual update required";
+    return @"";
+}
+
+- (NSTableColumn *)updateTableColumnWithIdentifier:(NSString *)identifier title:(NSString *)title width:(CGFloat)width {
+    NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:identifier];
+    column.title = title;
+    column.width = width;
+    column.minWidth = width;
+    return column;
+}
+
+- (void)runUpdateForItem:(NSDictionary *)item confirm:(BOOL)confirm {
+    NSString *command = [self updateCommandForItem:item];
+    if (command.length == 0) {
+        NSAlert *unsupported = [[NSAlert alloc] init];
+        unsupported.messageText = @"Update Not Supported";
+        unsupported.informativeText = @"CLI Ticker can apply Homebrew and global npm updates from the menu. Use the package manager directly for this source.";
+        [unsupported addButtonWithTitle:@"OK"];
+        [unsupported runModal];
+        return;
+    }
+
+    if (confirm) {
+        NSAlert *confirmAlert = [[NSAlert alloc] init];
+        confirmAlert.messageText = [NSString stringWithFormat:@"Update %@?", item[@"name"] ?: @"this CLI"];
+        confirmAlert.informativeText = [NSString stringWithFormat:@"CLI Ticker will open %@ and run:\n\n%@", self.preferredTerminal ?: DefaultTerminalName(), command];
+        [confirmAlert addButtonWithTitle:@"Update"];
+        [confirmAlert addButtonWithTitle:@"Cancel"];
+        if ([confirmAlert runModal] != NSAlertFirstButtonReturn) return;
+    }
+
+    NSString *terminalCommand = [self updateTerminalCommandForItem:item];
+    [self runShellCommand:terminalCommand inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
 }
 
 - (NSString *)updateCommandForItem:(NSDictionary *)item {
@@ -1093,61 +1143,52 @@ static NSString *DefaultTerminalName(void) {
 - (void)showAllUpdates:(id)sender {
     NSArray<NSDictionary *> *updates = [self notableUpdateItemsExcludingAgents:NSUIntegerMax];
     if (updates.count == 0) return;
+    self.allUpdateItems = updates;
 
-    NSMutableString *text = [NSMutableString string];
-    for (NSDictionary *item in updates) {
-        [text appendFormat:@"%@\n", [self friendlyUpdateTitle:item]];
-        NSString *command = [self updateCommandForItem:item];
-        if (command.length > 0) [text appendFormat:@"  $ %@\n", command];
-        [text appendString:@"\n"];
-    }
-
-    NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 560, 320)];
+    NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 760, 320)];
     scrollView.hasVerticalScroller = YES;
+    scrollView.hasHorizontalScroller = YES;
     scrollView.borderType = NSBezelBorder;
 
-    NSTextView *textView = [[NSTextView alloc] initWithFrame:scrollView.contentView.bounds];
-    textView.editable = NO;
-    textView.selectable = YES;
-    textView.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
-    textView.string = text;
-    textView.textContainerInset = NSMakeSize(8, 8);
-    scrollView.documentView = textView;
+    NSTableView *tableView = [[NSTableView alloc] initWithFrame:scrollView.contentView.bounds];
+    tableView.usesAlternatingRowBackgroundColors = YES;
+    tableView.allowsMultipleSelection = NO;
+    tableView.rowHeight = 24;
+    tableView.target = self;
+    tableView.doubleAction = @selector(updateSelectedFromAllUpdates:);
+    tableView.dataSource = (id<NSTableViewDataSource>)self;
+    tableView.delegate = (id<NSTableViewDelegate>)self;
+    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"tool" title:@"Tool" width:150]];
+    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"current" title:@"Current" width:95]];
+    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"latest" title:@"Latest" width:95]];
+    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"source" title:@"Source" width:120]];
+    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"command" title:@"Command" width:285]];
+    scrollView.documentView = tableView;
 
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = [NSString stringWithFormat:@"All Updates Available (%lu)", updates.count];
-    alert.informativeText = @"Review the full batch below. Click an individual update from the menu to run it.";
+    alert.informativeText = [NSString stringWithFormat:@"Double-click an update to run it in %@.", self.preferredTerminal ?: DefaultTerminalName()];
     alert.accessoryView = scrollView;
     [alert addButtonWithTitle:@"Done"];
     [alert addButtonWithTitle:@"Open Markdown Report"];
     if ([alert runModal] == NSAlertSecondButtonReturn) {
         [self openMarkdownReport:nil];
     }
+    self.allUpdateItems = nil;
+}
+
+- (void)updateSelectedFromAllUpdates:(NSTableView *)sender {
+    NSInteger row = sender.clickedRow >= 0 ? sender.clickedRow : sender.selectedRow;
+    if (row < 0 || row >= (NSInteger)self.allUpdateItems.count) return;
+
+    NSDictionary *item = self.allUpdateItems[row];
+    [self runUpdateForItem:item confirm:NO];
 }
 
 - (void)applyUpdate:(NSMenuItem *)sender {
     NSDictionary *item = sender.representedObject;
     if (![item isKindOfClass:[NSDictionary class]]) return;
-
-    NSString *command = [self updateCommandForItem:item];
-    if (command.length == 0) {
-        NSAlert *unsupported = [[NSAlert alloc] init];
-        unsupported.messageText = @"Update Not Supported";
-        unsupported.informativeText = @"CLI Ticker can apply Homebrew and global npm updates from the menu. Use the package manager directly for this source.";
-        [unsupported addButtonWithTitle:@"OK"];
-        [unsupported runModal];
-        return;
-    }
-
-    NSAlert *confirm = [[NSAlert alloc] init];
-    confirm.messageText = [NSString stringWithFormat:@"Update %@?", item[@"name"] ?: @"this CLI"];
-    confirm.informativeText = [NSString stringWithFormat:@"CLI Ticker will open %@ and run:\n\n%@", self.preferredTerminal ?: DefaultTerminalName(), command];
-    [confirm addButtonWithTitle:@"Update"];
-    [confirm addButtonWithTitle:@"Cancel"];
-    if ([confirm runModal] != NSAlertFirstButtonReturn) return;
-
-    NSString *terminalCommand = [self updateTerminalCommandForItem:item];
-    [self runShellCommand:terminalCommand inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
+    [self runUpdateForItem:item confirm:YES];
 }
 
 - (void)openJSONReport:(id)sender {
