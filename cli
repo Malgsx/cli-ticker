@@ -1,0 +1,43 @@
+#!/usr/bin/env sh
+set -eu
+
+usage() {
+    cat <<'EOF'
+Usage: ./cli <command>
+
+Commands:
+  run     Build and open CLI Ticker
+  build   Build CLI Ticker
+  dist    Build the distributable archive
+  clean   Remove build artifacts
+EOF
+}
+
+command="${1:-}"
+
+case "$command" in
+    run)
+        make run
+        ;;
+    build)
+        make
+        ;;
+    dist)
+        make dist
+        ;;
+    clean)
+        make clean
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    "")
+        usage
+        exit 1
+        ;;
+    *)
+        printf 'Unknown command: %s\n\n' "$command" >&2
+        usage >&2
+        exit 1
+        ;;
+esac

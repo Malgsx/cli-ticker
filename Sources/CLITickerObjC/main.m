@@ -197,6 +197,16 @@ static NSString *EscapedAppleScriptString(NSString *string) {
     return escaped;
 }
 
+static NSTextField *GlassLabel(NSString *text, NSRect frame, NSFont *font, NSColor *color, NSTextAlignment alignment) {
+    NSTextField *label = [NSTextField labelWithString:text ?: @""];
+    label.frame = frame;
+    label.font = font;
+    label.textColor = color;
+    label.alignment = alignment;
+    label.lineBreakMode = NSLineBreakByTruncatingTail;
+    return label;
+}
+
 static BOOL AppExists(NSString *path) {
     return [[NSFileManager defaultManager] fileExistsAtPath:path];
 }
@@ -767,7 +777,18 @@ static NSString *DefaultTerminalName(void) {
 - (void)runShellCommand:(NSString *)command inTerminal:(NSString *)terminal {
     NSString *ghosttyPath = FindApplicationPath(@[@"Ghostty.app"]);
     if ([terminal isEqualToString:@"Ghostty"] && ghosttyPath.length > 0) {
-        RunCommand(@"/usr/bin/open", @[@"-na", ghosttyPath, @"--args", @"-e", @"/bin/zsh", @"-lc", command]);
+        RunCommand(@"/usr/bin/osascript", @[
+            @"-e", @"on run argv",
+            @"-e", @"tell application \"Ghostty\"",
+            @"-e", @"activate",
+            @"-e", @"set cliTickerConfig to new surface configuration",
+            @"-e", @"set initial input of cliTickerConfig to item 1 of argv & return",
+            @"-e", @"new window with configuration cliTickerConfig",
+            @"-e", @"end tell",
+            @"-e", @"end run",
+            @"--",
+            command
+        ]);
         return;
     }
 
@@ -806,10 +827,39 @@ static NSString *DefaultTerminalName(void) {
     RunCommand(@"/usr/bin/osascript", @[@"-e", script]);
 }
 
-- (void)addSectionTitle:(NSString *)title toMenu:(NSMenu *)menu {
-    NSMenuItem *section = [[NSMenuItem alloc] initWithTitle:title action:nil keyEquivalent:@""];
-    section.enabled = NO;
-    [menu addItem:section];
+- (NSMenuItem *)summaryMenuItem {
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+    if (@available(macOS 26.0, *)) {
+        NSUInteger outdated = 0;
+        for (NSDictionary *item in self.items) {
+            if ([item[@"status"] isEqualToString:StatusOutdated]) outdated++;
+        }
+
+        NSRect frame = NSMakeRect(0, 0, 330, 82);
+        NSGlassEffectView *glass = [[NSGlassEffectView alloc] initWithFrame:frame];
+        glass.style = NSGlassEffectViewStyleRegular;
+        glass.cornerRadius = 18;
+        glass.tintColor = [NSColor colorWithCalibratedRed:0.18 green:0.34 blue:0.92 alpha:0.16];
+
+        NSView *content = [[NSView alloc] initWithFrame:frame];
+        content.wantsLayer = YES;
+        glass.contentView = content;
+
+        NSString *state = self.refreshing ? @"Refreshing inventory…" : @"Local CLI inventory";
+        [content addSubview:GlassLabel(@"CLI Ticker", NSMakeRect(18, 49, 185, 22), [NSFont boldSystemFontOfSize:17], [NSColor labelColor], NSTextAlignmentLeft)];
+        [content addSubview:GlassLabel(state, NSMakeRect(18, 30, 185, 18), [NSFont systemFontOfSize:12 weight:NSFontWeightMedium], [NSColor secondaryLabelColor], NSTextAlignmentLeft)];
+        [content addSubview:GlassLabel([NSString stringWithFormat:@"%lu CLIs", self.items.count], NSMakeRect(218, 51, 92, 16), [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightSemibold], [NSColor labelColor], NSTextAlignmentRight)];
+        [content addSubview:GlassLabel([NSString stringWithFormat:@"%lu updates", outdated], NSMakeRect(218, 32, 92, 16), [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular], outdated > 0 ? [NSColor systemOrangeColor] : [NSColor secondaryLabelColor], NSTextAlignmentRight)];
+
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:@"" action:nil keyEquivalent:@""];
+        item.view = glass;
+        return item;
+    }
+#endif
+
+    NSMenuItem *summary = [[NSMenuItem alloc] initWithTitle:[self summaryTitle] action:nil keyEquivalent:@""];
+    summary.enabled = NO;
+    return summary;
 }
 
 - (NSArray<NSDictionary *> *)notableUpdateItemsExcludingAgents:(NSUInteger)limit {
@@ -887,9 +937,7 @@ static NSString *DefaultTerminalName(void) {
 
 - (void)rebuildMenu {
     NSMenu *menu = [[NSMenu alloc] init];
-    NSMenuItem *summary = [[NSMenuItem alloc] initWithTitle:[self summaryTitle] action:nil keyEquivalent:@""];
-    summary.enabled = NO;
-    [menu addItem:summary];
+    [menu addItem:[self summaryMenuItem]];
     [menu addItem:[NSMenuItem separatorItem]];
 
     NSArray *agents = [self agentTools];
@@ -927,6 +975,10 @@ static NSString *DefaultTerminalName(void) {
             [updatesMenu addItem:[self notableUpdateMenuItemForItem:item]];
         }
         [updatesMenu addItem:[NSMenuItem separatorItem]];
+        NSMenuItem *showAll = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Show All %lu Updates…", totalUpdates] action:@selector(showAllUpdates:) keyEquivalent:@""];
+        showAll.target = self;
+        showAll.image = [NSImage imageWithSystemSymbolName:@"list.bullet.rectangle" accessibilityDescription:@"Show All Updates"];
+        [updatesMenu addItem:showAll];
         NSString *noteText = totalUpdates > notableUpdates.count
             ? [NSString stringWithFormat:@"Showing %lu of %lu updates", notableUpdates.count, totalUpdates]
             : @"Click an update to apply it";
@@ -1015,6 +1067,41 @@ static NSString *DefaultTerminalName(void) {
     results.informativeText = [self searchResultsTextForQuery:query];
     [results addButtonWithTitle:@"Done"];
     [results runModal];
+}
+
+- (void)showAllUpdates:(id)sender {
+    NSArray<NSDictionary *> *updates = [self notableUpdateItemsExcludingAgents:NSUIntegerMax];
+    if (updates.count == 0) return;
+
+    NSMutableString *text = [NSMutableString string];
+    for (NSDictionary *item in updates) {
+        [text appendFormat:@"%@\n", [self friendlyUpdateTitle:item]];
+        NSString *command = [self updateCommandForItem:item];
+        if (command.length > 0) [text appendFormat:@"  $ %@\n", command];
+        [text appendString:@"\n"];
+    }
+
+    NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 560, 320)];
+    scrollView.hasVerticalScroller = YES;
+    scrollView.borderType = NSBezelBorder;
+
+    NSTextView *textView = [[NSTextView alloc] initWithFrame:scrollView.contentView.bounds];
+    textView.editable = NO;
+    textView.selectable = YES;
+    textView.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
+    textView.string = text;
+    textView.textContainerInset = NSMakeSize(8, 8);
+    scrollView.documentView = textView;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = [NSString stringWithFormat:@"All Updates Available (%lu)", updates.count];
+    alert.informativeText = @"Review the full batch below. Click an individual update from the menu to run it.";
+    alert.accessoryView = scrollView;
+    [alert addButtonWithTitle:@"Done"];
+    [alert addButtonWithTitle:@"Open Markdown Report"];
+    if ([alert runModal] == NSAlertSecondButtonReturn) {
+        [self openMarkdownReport:nil];
+    }
 }
 
 - (void)applyUpdate:(NSMenuItem *)sender {

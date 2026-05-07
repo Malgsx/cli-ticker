@@ -56,7 +56,7 @@ No remote account, telemetry endpoint, or server sync is built into this version
 ## Run Locally
 
 ```sh
-make run
+./cli run
 ```
 
 The first refresh can take a while because Homebrew and npm update checks shell out to local package managers.
@@ -64,7 +64,7 @@ The first refresh can take a while because Homebrew and npm update checks shell 
 ## Build The App
 
 ```sh
-make
+./cli build
 open build/CLITicker.app
 ```
 
@@ -73,7 +73,7 @@ The runnable app is `build/CLITicker.app`.
 ## Create A Shareable Zip
 
 ```sh
-make dist
+./cli dist
 ```
 
 This creates:
