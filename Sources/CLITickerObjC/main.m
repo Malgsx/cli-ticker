@@ -684,7 +684,7 @@ static NSString *DefaultTerminalName(void) {
     if ([identifier isEqualToString:@"latest"]) return item[@"latestVersion"] ?: @"";
     if ([identifier isEqualToString:@"source"]) return item[@"source"] ?: @"";
     if ([identifier isEqualToString:@"command"]) {
-        if (tableView == self.searchResultsTableView) return [self commandForCLIItem:item];
+        if (tableView == self.searchResultsTableView) return [self invocationForCLIItem:item];
         return [self updateCommandForItem:item] ?: @"Manual update required";
     }
     return @"";
@@ -906,19 +906,28 @@ static NSString *DefaultTerminalName(void) {
 }
 
 - (NSString *)commandForCLIItem:(NSDictionary *)item {
-    NSString *displayName = [self displayNameForItem:item];
-    if ([AgentToolNames() containsObject:displayName]) return [self commandForAgentItem:item];
-
     NSString *path = item[@"path"];
     if (path.length > 0 && [[NSFileManager defaultManager] isExecutableFileAtPath:path]) return path;
 
+    NSString *invocation = [self invocationForCLIItem:item];
+    NSString *resolved = invocation.length > 0 ? CommandPath(invocation) : nil;
+    return resolved.length > 0 ? resolved : invocation;
+}
+
+- (NSString *)invocationForCLIItem:(NSDictionary *)item {
+    NSString *displayName = [self displayNameForItem:item];
+    if ([displayName isEqualToString:@"coderabbit"]) return @"coderabbit";
+    if ([displayName isEqualToString:@"cursor-agent"]) return @"cursor-agent";
+    if ([displayName isEqualToString:@"opencode"]) return @"opencode";
+    if ([AgentToolNames() containsObject:displayName]) return displayName;
+
     NSString *name = item[@"name"] ?: @"";
-    NSString *resolved = name.length > 0 ? CommandPath(name) : nil;
-    return resolved.length > 0 ? resolved : name;
+    NSString *path = item[@"path"];
+    return name.length > 0 ? name : path.lastPathComponent;
 }
 
 - (NSString *)launchCommandForCLIItem:(NSDictionary *)item {
-    NSString *command = [self commandForCLIItem:item];
+    NSString *command = [self invocationForCLIItem:item];
     NSString *label = [self friendlyAgentName:[self displayNameForItem:item]];
     if (label.length == 0) label = item[@"name"] ?: @"CLI";
     NSString *escapedCommand = [command stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
@@ -1232,7 +1241,7 @@ static NSString *DefaultTerminalName(void) {
 - (void)copyLaunchScriptForSearchResult:(NSDictionary *)item {
     if (!item) return;
 
-    NSString *script = [self launchCommandForCLIItem:item];
+    NSString *script = [self invocationForCLIItem:item];
     NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
     [pasteboard clearContents];
     [pasteboard setString:script forType:NSPasteboardTypeString];
