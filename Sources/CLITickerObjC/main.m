@@ -405,6 +405,8 @@ static NSString *DefaultTerminalName(void) {
 @property BOOL refreshing;
 @property NSURL *reportURL;
 @property NSURL *markdownReportURL;
+@property NSURL *updateRefreshRequestURL;
+@property NSDate *lastHandledUpdateRefreshDate;
 @property NSString *preferredTerminal;
 @end
 
@@ -435,11 +437,15 @@ static NSString *DefaultTerminalName(void) {
     [[NSFileManager defaultManager] createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:nil];
     self.reportURL = [dir URLByAppendingPathComponent:@"inventory.json"];
     self.markdownReportURL = [dir URLByAppendingPathComponent:@"inventory.md"];
+    self.updateRefreshRequestURL = [dir URLByAppendingPathComponent:@"update-refresh-request"];
+    NSDictionary *markerAttributes = [[NSFileManager defaultManager] attributesOfItemAtPath:self.updateRefreshRequestURL.path error:nil];
+    self.lastHandledUpdateRefreshDate = markerAttributes[NSFileModificationDate];
     [self loadReport];
     [self rebuildMenu];
     [self refresh:nil];
 
     [NSTimer scheduledTimerWithTimeInterval:15 * 60 target:self selector:@selector(refresh:) userInfo:nil repeats:YES];
+    [NSTimer scheduledTimerWithTimeInterval:5 target:self selector:@selector(checkForUpdateRefreshRequest:) userInfo:nil repeats:YES];
     return self;
 }
 
@@ -635,9 +641,13 @@ static NSString *DefaultTerminalName(void) {
     if (command.length == 0) return nil;
 
     NSString *title = [NSString stringWithFormat:@"CLI Ticker - Update %@", item[@"name"] ?: @"CLI"];
+    NSString *markerPath = self.updateRefreshRequestURL.path ?: @"";
+    NSString *markerDir = markerPath.stringByDeletingLastPathComponent;
     NSString *escapedCommand = [command stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
     NSString *escapedTitle = [title stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
-    return [NSString stringWithFormat:@"printf '\\033]0;%@\\007'; echo 'Running %@'; echo; %@; status=$?; echo; echo \"Update finished with exit code $status.\"; echo 'Press Return to close this session.'; read _; exec ${SHELL:-/bin/zsh} -l", escapedTitle, escapedCommand, command];
+    NSString *escapedMarkerDir = [markerDir stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
+    NSString *escapedMarkerPath = [markerPath stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
+    return [NSString stringWithFormat:@"printf '\\033]0;%@\\007'; echo 'Running %@'; echo; %@; status=$?; if [ $status -eq 0 ]; then mkdir -p '%@'; touch '%@'; fi; echo; echo \"Update finished with exit code $status.\"; echo 'CLI Ticker will refresh Updates Available automatically after successful updates.'; echo 'Press Return to close this session.'; read _; exec ${SHELL:-/bin/zsh} -l", escapedTitle, escapedCommand, command, escapedMarkerDir, escapedMarkerPath];
 }
 
 - (NSString *)displayNameForItem:(NSDictionary *)item {
@@ -1029,6 +1039,17 @@ static NSString *DefaultTerminalName(void) {
             [self rebuildMenu];
         });
     });
+}
+
+- (void)checkForUpdateRefreshRequest:(id)sender {
+    NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:self.updateRefreshRequestURL.path error:nil];
+    NSDate *modified = attributes[NSFileModificationDate];
+    if (!modified) return;
+    if (self.lastHandledUpdateRefreshDate && [modified compare:self.lastHandledUpdateRefreshDate] != NSOrderedDescending) return;
+    if (self.refreshing) return;
+
+    self.lastHandledUpdateRefreshDate = modified;
+    [self refresh:nil];
 }
 
 - (void)selectTerminal:(NSMenuItem *)sender {
