@@ -411,6 +411,8 @@ static NSString *DefaultTerminalName(void) {
 @property NSArray<NSDictionary *> *allUpdateItems;
 @property NSTableView *allUpdatesTableView;
 @property NSAlert *allUpdatesAlert;
+@property NSArray<NSDictionary *> *searchResultItems;
+@property NSTableView *searchResultsTableView;
 @end
 
 @implementation MenuController
@@ -609,33 +611,26 @@ static NSString *DefaultTerminalName(void) {
     return matches;
 }
 
-- (NSString *)searchResultsTextForQuery:(NSString *)query {
-    NSArray<NSDictionary *> *matches = [self searchItemsMatching:query limit:40];
-    if (matches.count == 0) return @"No matching CLIs found.";
-
-    NSMutableString *text = [NSMutableString string];
-    for (NSDictionary *item in matches) {
-        [text appendFormat:@"%@\n", [self rowTitle:item]];
-        NSString *path = item[@"path"];
-        if (path.length > 0) [text appendFormat:@"  %@\n", path];
-    }
-    return text;
-}
-
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
+    if (tableView == self.searchResultsTableView) return self.searchResultItems.count;
     return self.allUpdateItems.count;
 }
 
 - (id)tableView:(NSTableView *)tableView objectValueForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)self.allUpdateItems.count) return @"";
-    NSDictionary *item = self.allUpdateItems[row];
+    NSArray<NSDictionary *> *items = tableView == self.searchResultsTableView ? self.searchResultItems : self.allUpdateItems;
+    if (row < 0 || row >= (NSInteger)items.count) return @"";
+    NSDictionary *item = items[row];
     NSString *identifier = tableColumn.identifier;
 
     if ([identifier isEqualToString:@"tool"]) return item[@"name"] ?: @"";
+    if ([identifier isEqualToString:@"version"]) return item[@"currentVersion"] ?: @"installed";
     if ([identifier isEqualToString:@"current"]) return item[@"currentVersion"] ?: @"installed";
     if ([identifier isEqualToString:@"latest"]) return item[@"latestVersion"] ?: @"";
     if ([identifier isEqualToString:@"source"]) return item[@"source"] ?: @"";
-    if ([identifier isEqualToString:@"command"]) return [self updateCommandForItem:item] ?: @"Manual update required";
+    if ([identifier isEqualToString:@"command"]) {
+        if (tableView == self.searchResultsTableView) return [self commandForCLIItem:item];
+        return [self updateCommandForItem:item] ?: @"Manual update required";
+    }
     return @"";
 }
 
@@ -838,6 +833,27 @@ static NSString *DefaultTerminalName(void) {
     NSString *label = [self friendlyAgentName:[self displayNameForItem:item]];
     NSString *escapedCommand = [command stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
     return [NSString stringWithFormat:@"printf '\\033]0;CLI Ticker - %@\\007'; echo 'Launching %@'; echo; '%@'; echo; echo 'Session finished. Close this window or continue using the shell.'; exec ${SHELL:-/bin/zsh} -l", label, label, escapedCommand];
+}
+
+- (NSString *)commandForCLIItem:(NSDictionary *)item {
+    NSString *displayName = [self displayNameForItem:item];
+    if ([AgentToolNames() containsObject:displayName]) return [self commandForAgentItem:item];
+
+    NSString *path = item[@"path"];
+    if (path.length > 0 && [[NSFileManager defaultManager] isExecutableFileAtPath:path]) return path;
+
+    NSString *name = item[@"name"] ?: @"";
+    NSString *resolved = name.length > 0 ? CommandPath(name) : nil;
+    return resolved.length > 0 ? resolved : name;
+}
+
+- (NSString *)launchCommandForCLIItem:(NSDictionary *)item {
+    NSString *command = [self commandForCLIItem:item];
+    NSString *label = [self friendlyAgentName:[self displayNameForItem:item]];
+    if (label.length == 0) label = item[@"name"] ?: @"CLI";
+    NSString *escapedCommand = [command stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
+    NSString *escapedLabel = [label stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
+    return [NSString stringWithFormat:@"printf '\\033]0;CLI Ticker - %@\\007'; echo 'Launching %@'; echo; '%@'; echo; echo 'Session finished. Close this window or continue using the shell.'; exec ${SHELL:-/bin/zsh} -l", escapedLabel, escapedLabel, escapedCommand];
 }
 
 - (NSArray<NSString *> *)availableTerminals {
@@ -1133,6 +1149,29 @@ static NSString *DefaultTerminalName(void) {
     [self runShellCommand:command inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
 }
 
+- (NSDictionary *)selectedSearchResultFromTable:(NSTableView *)tableView {
+    NSInteger row = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow;
+    if (row < 0 || row >= (NSInteger)self.searchResultItems.count) return nil;
+    return self.searchResultItems[row];
+}
+
+- (void)openSelectedSearchResult:(NSTableView *)sender {
+    NSDictionary *item = [self selectedSearchResultFromTable:sender];
+    if (!item) return;
+
+    NSString *command = [self launchCommandForCLIItem:item];
+    [self runShellCommand:command inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
+}
+
+- (void)copyLaunchScriptForSearchResult:(NSDictionary *)item {
+    if (!item) return;
+
+    NSString *script = [self launchCommandForCLIItem:item];
+    NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+    [pasteboard clearContents];
+    [pasteboard setString:script forType:NSPasteboardTypeString];
+}
+
 - (void)searchCLIs:(id)sender {
     NSAlert *prompt = [[NSAlert alloc] init];
     prompt.messageText = @"Search CLIs";
@@ -1148,11 +1187,51 @@ static NSString *DefaultTerminalName(void) {
     if (response != NSAlertFirstButtonReturn) return;
 
     NSString *query = field.stringValue ?: @"";
+    NSArray<NSDictionary *> *matches = [self searchItemsMatching:query limit:80];
+    if (matches.count == 0) {
+        NSAlert *empty = [[NSAlert alloc] init];
+        empty.messageText = [NSString stringWithFormat:@"No CLIs Found for \"%@\"", query];
+        empty.informativeText = @"Try searching by command name, package manager, version, status, or path.";
+        [empty addButtonWithTitle:@"Done"];
+        [empty runModal];
+        return;
+    }
+
+    self.searchResultItems = matches;
+
+    NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 620, 240)];
+    scrollView.hasVerticalScroller = YES;
+    scrollView.hasHorizontalScroller = YES;
+    scrollView.borderType = NSBezelBorder;
+
+    NSTableView *tableView = [[NSTableView alloc] initWithFrame:scrollView.contentView.bounds];
+    tableView.usesAlternatingRowBackgroundColors = YES;
+    tableView.allowsMultipleSelection = NO;
+    tableView.rowHeight = 24;
+    tableView.target = self;
+    tableView.doubleAction = @selector(openSelectedSearchResult:);
+    tableView.dataSource = (id<NSTableViewDataSource>)self;
+    tableView.delegate = (id<NSTableViewDelegate>)self;
+    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"tool" title:@"Tool" width:145]];
+    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"version" title:@"Version" width:90]];
+    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"source" title:@"Source" width:115]];
+    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"command" title:@"Bash command" width:250]];
+    [tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+    scrollView.documentView = tableView;
+    self.searchResultsTableView = tableView;
+
     NSAlert *results = [[NSAlert alloc] init];
     results.messageText = [NSString stringWithFormat:@"Search Results for \"%@\"", query];
-    results.informativeText = [self searchResultsTextForQuery:query];
+    results.informativeText = [NSString stringWithFormat:@"Double-click a CLI to open it in %@, or copy its bash launch script.", self.preferredTerminal ?: DefaultTerminalName()];
+    results.accessoryView = scrollView;
     [results addButtonWithTitle:@"Done"];
-    [results runModal];
+    [results addButtonWithTitle:@"Copy Bash Script"];
+    if ([results runModal] == NSAlertSecondButtonReturn) {
+        [self copyLaunchScriptForSearchResult:[self selectedSearchResultFromTable:tableView]];
+    }
+
+    self.searchResultsTableView = nil;
+    self.searchResultItems = nil;
 }
 
 - (void)showAllUpdates:(id)sender {
