@@ -587,28 +587,78 @@ static NSString *DefaultTerminalName(void) {
     NSString *trimmed = [query stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (trimmed.length == 0) return @[];
 
-    NSArray<NSString *> *terms = [[trimmed lowercaseString] componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-    NSMutableArray *matches = [NSMutableArray array];
+    NSMutableArray<NSString *> *terms = [NSMutableArray array];
+    for (NSString *term in [[trimmed lowercaseString] componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]]) {
+        if (term.length > 0) [terms addObject:term];
+    }
+
+    NSMutableArray<NSDictionary *> *scoredMatches = [NSMutableArray array];
     for (NSDictionary *item in self.items) {
-        NSMutableArray *parts = [NSMutableArray array];
-        for (NSString *key in @[@"name", @"source", @"status", @"currentVersion", @"latestVersion", @"path"]) {
-            NSString *value = item[key];
-            if ([value isKindOfClass:[NSString class]] && value.length > 0) [parts addObject:value];
-        }
-        NSString *haystack = [[parts componentsJoinedByString:@" "] lowercaseString];
-        BOOL matched = YES;
+        NSInteger score = 0;
         for (NSString *term in terms) {
-            if (term.length == 0) continue;
-            if ([haystack rangeOfString:term].location == NSNotFound) {
-                matched = NO;
+            NSInteger termScore = [self searchScoreForItem:item term:term];
+            if (termScore == 0) {
+                score = 0;
                 break;
             }
+            score += termScore;
         }
-        if (!matched) continue;
-        [matches addObject:item];
+        if (score == 0) continue;
+        [scoredMatches addObject:@{@"item": item, @"score": @(score)}];
+    }
+
+    NSArray<NSDictionary *> *sorted = [scoredMatches sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        NSInteger scoreA = [a[@"score"] integerValue];
+        NSInteger scoreB = [b[@"score"] integerValue];
+        if (scoreA > scoreB) return NSOrderedAscending;
+        if (scoreA < scoreB) return NSOrderedDescending;
+        return [a[@"item"][@"name"] localizedCaseInsensitiveCompare:b[@"item"][@"name"]];
+    }];
+
+    NSMutableArray *matches = [NSMutableArray array];
+    for (NSDictionary *match in sorted) {
+        [matches addObject:match[@"item"]];
         if (matches.count >= limit) break;
     }
     return matches;
+}
+
+- (NSArray<NSString *> *)searchTokensForString:(NSString *)value {
+    if (![value isKindOfClass:[NSString class]] || value.length == 0) return @[];
+    NSArray<NSString *> *parts = [[value lowercaseString] componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]];
+    NSMutableArray<NSString *> *tokens = [NSMutableArray array];
+    for (NSString *part in parts) {
+        if (part.length > 0) [tokens addObject:part];
+    }
+    return tokens;
+}
+
+- (NSInteger)searchScoreForItem:(NSDictionary *)item term:(NSString *)term {
+    NSString *name = [item[@"name"] isKindOfClass:[NSString class]] ? [item[@"name"] lowercaseString] : @"";
+    NSString *displayName = [[self displayNameForItem:item] lowercaseString];
+    NSString *source = [item[@"source"] isKindOfClass:[NSString class]] ? [item[@"source"] lowercaseString] : @"";
+    NSString *path = [item[@"path"] isKindOfClass:[NSString class]] ? [item[@"path"] lowercaseString] : @"";
+    NSString *pathName = path.lastPathComponent ?: @"";
+
+    if ([displayName isEqualToString:term]) return 1000;
+    if ([name isEqualToString:term]) return 950;
+    if ([pathName isEqualToString:term]) return 900;
+
+    NSMutableArray<NSString *> *tokens = [NSMutableArray array];
+    [tokens addObjectsFromArray:[self searchTokensForString:name]];
+    [tokens addObjectsFromArray:[self searchTokensForString:displayName]];
+    [tokens addObjectsFromArray:[self searchTokensForString:pathName]];
+    if ([tokens containsObject:term]) return 800;
+
+    if (term.length <= 2) return 0;
+
+    for (NSString *token in tokens) {
+        if ([token hasPrefix:term]) return 520;
+    }
+    if ([name rangeOfString:term].location != NSNotFound) return 300;
+    if ([pathName rangeOfString:term].location != NSNotFound) return 260;
+    if ([source rangeOfString:term].location != NSNotFound) return 180;
+    return 0;
 }
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
@@ -1187,7 +1237,7 @@ static NSString *DefaultTerminalName(void) {
     if (response != NSAlertFirstButtonReturn) return;
 
     NSString *query = field.stringValue ?: @"";
-    NSArray<NSDictionary *> *matches = [self searchItemsMatching:query limit:80];
+    NSArray<NSDictionary *> *matches = [self searchItemsMatching:query limit:24];
     if (matches.count == 0) {
         NSAlert *empty = [[NSAlert alloc] init];
         empty.messageText = [NSString stringWithFormat:@"No CLIs Found for \"%@\"", query];
@@ -1199,7 +1249,7 @@ static NSString *DefaultTerminalName(void) {
 
     self.searchResultItems = matches;
 
-    NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 620, 240)];
+    NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 540, 190)];
     scrollView.hasVerticalScroller = YES;
     scrollView.hasHorizontalScroller = YES;
     scrollView.borderType = NSBezelBorder;
@@ -1207,15 +1257,15 @@ static NSString *DefaultTerminalName(void) {
     NSTableView *tableView = [[NSTableView alloc] initWithFrame:scrollView.contentView.bounds];
     tableView.usesAlternatingRowBackgroundColors = YES;
     tableView.allowsMultipleSelection = NO;
-    tableView.rowHeight = 24;
+    tableView.rowHeight = 22;
     tableView.target = self;
     tableView.doubleAction = @selector(openSelectedSearchResult:);
     tableView.dataSource = (id<NSTableViewDataSource>)self;
     tableView.delegate = (id<NSTableViewDelegate>)self;
-    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"tool" title:@"Tool" width:145]];
-    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"version" title:@"Version" width:90]];
-    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"source" title:@"Source" width:115]];
-    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"command" title:@"Bash command" width:250]];
+    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"tool" title:@"Tool" width:130]];
+    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"version" title:@"Version" width:78]];
+    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"source" title:@"Source" width:100]];
+    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"command" title:@"Command" width:220]];
     [tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
     scrollView.documentView = tableView;
     self.searchResultsTableView = tableView;
