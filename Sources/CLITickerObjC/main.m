@@ -72,6 +72,8 @@ static NSSet<NSString *> *AgentToolNames(void) {
             @"goose",
             @"hermes",
             @"kisuke",
+            @"notion",
+            @"ntn",
             @"opencode",
             @"pi",
             @"spawn",
@@ -84,6 +86,7 @@ static NSSet<NSString *> *AgentToolNames(void) {
 static NSArray<NSString *> *PreferredAgentOrder(void) {
     return @[
         @"codex",
+        @"notion",
         @"claude",
         @"amp",
         @"cursor",
@@ -111,7 +114,8 @@ static NSDictionary<NSString *, NSString *> *PackageAliases(void) {
             @"@sourcegraph/amp": @"amp",
             @"@mariozechner/pi-coding-agent": @"pi",
             @"block-goose-cli": @"goose",
-            @"kisuke-cli-dev": @"kisuke"
+            @"kisuke-cli-dev": @"kisuke",
+            @"ntn": @"notion"
         };
     });
     return aliases;
@@ -128,6 +132,7 @@ static NSDictionary<NSString *, NSDictionary *> *AgentBrandMetadata(void) {
             @"cursor": @{@"label": @"Cursor", @"mark": @"⌘", @"color": [NSColor colorWithCalibratedWhite:0.12 alpha:1.0]},
             @"cursor-agent": @{@"label": @"Cursor Agent", @"mark": @"CA", @"color": [NSColor colorWithCalibratedWhite:0.12 alpha:1.0]},
             @"goose": @{@"label": @"Goose", @"mark": @"G", @"color": [NSColor colorWithCalibratedRed:0.12 green:0.44 blue:0.82 alpha:1.0]},
+            @"notion": @{@"label": @"Notion", @"mark": @"N", @"color": [NSColor colorWithCalibratedRed:0.13 green:0.55 blue:0.90 alpha:1.0]},
             @"opencode": @{@"label": @"OpenCode", @"mark": @"OC", @"color": [NSColor colorWithCalibratedRed:0.12 green:0.12 blue:0.13 alpha:1.0]},
             @"coderabbit": @{@"label": @"CodeRabbit", @"mark": @"CR", @"color": [NSColor colorWithCalibratedRed:0.94 green:0.42 blue:0.18 alpha:1.0]},
             @"kisuke": @{@"label": @"Kisuke", @"mark": @"K", @"color": [NSColor colorWithCalibratedRed:0.83 green:0.66 blue:0.16 alpha:1.0]},
@@ -156,6 +161,7 @@ static NSImage *AgentIcon(NSString *canonicalName) {
         @"hermes": @"nousresearch",
         @"goose": @"block-goose",
         @"kisuke": @"kisuke",
+        @"notion": @"notion-blue",
         @"toad": @"toad",
         @"spawn": @"spawn"
     };
@@ -876,6 +882,7 @@ static NSString *DefaultTerminalName(void) {
     NSDictionary *commands = @{
         @"coderabbit": @"coderabbit",
         @"cursor-agent": @"cursor-agent",
+        @"notion": @"ntn",
         @"opencode": @"opencode"
     };
     NSString *command = commands[canonicalName] ?: canonicalName;

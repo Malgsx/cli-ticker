@@ -30,8 +30,8 @@ $(BIN): Sources/CLITickerObjC/main.m $(ICON)
 	'  <key>CFBundleName</key><string>CLI Ticker</string>' \
 	'  <key>CFBundlePackageType</key><string>APPL</string>' \
 	'  <key>CFBundleIconFile</key><string>CLITicker</string>' \
-	'  <key>CFBundleVersion</key><string>0.1.0</string>' \
-	'  <key>CFBundleShortVersionString</key><string>0.1.0</string>' \
+	'  <key>CFBundleVersion</key><string>0.1.1</string>' \
+	'  <key>CFBundleShortVersionString</key><string>0.1.1</string>' \
 	'  <key>LSUIElement</key><true/>' \
 	'</dict>' \
 	'</plist>' > "$(APP_DIR)/Contents/Info.plist"
