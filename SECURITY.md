@@ -1,6 +1,6 @@
 # Security
 
-CLI Ticker shells out to local package managers and scans executable paths. Treat changes to command construction and shell launching carefully.
+CLI shells out to local package managers and scans executable paths. Treat changes to command construction and shell launching carefully.
 
 ## Reporting Issues
 

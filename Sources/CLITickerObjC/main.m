@@ -73,7 +73,6 @@ static NSSet<NSString *> *AgentToolNames(void) {
             @"hermes",
             @"kisuke",
             @"notion",
-            @"ntn",
             @"opencode",
             @"pi",
             @"spawn",
@@ -115,7 +114,7 @@ static NSDictionary<NSString *, NSString *> *PackageAliases(void) {
             @"@mariozechner/pi-coding-agent": @"pi",
             @"block-goose-cli": @"goose",
             @"kisuke-cli-dev": @"kisuke",
-            @"ntn": @"notion"
+            @"notionctl": @"notion"
         };
     });
     return aliases;
@@ -254,13 +253,28 @@ static NSString *DefaultTerminalName(void) {
 - (NSArray<NSMutableDictionary *> *)refresh {
     NSMutableDictionary<NSString *, NSMutableDictionary *> *merged = [NSMutableDictionary dictionary];
     NSMutableArray<NSMutableDictionary *> *all = [NSMutableArray array];
+    NSLock *allLock = [[NSLock alloc] init];
+    dispatch_group_t group = dispatch_group_create();
+    dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
 
-    [all addObjectsFromArray:[self pathBinaries]];
-    [all addObjectsFromArray:[self brewItemsWithCasks:NO]];
-    [all addObjectsFromArray:[self brewItemsWithCasks:YES]];
-    [all addObjectsFromArray:[self npmGlobals]];
-    [all addObjectsFromArray:[self bunGlobals]];
-    [all addObjectsFromArray:[self uvTools]];
+    void (^addScanner)(NSArray<NSMutableDictionary *> *(^)(void)) = ^(NSArray<NSMutableDictionary *> *(^scanner)(void)) {
+        dispatch_group_enter(group);
+        dispatch_async(queue, ^{
+            NSArray<NSMutableDictionary *> *items = scanner();
+            [allLock lock];
+            [all addObjectsFromArray:items];
+            [allLock unlock];
+            dispatch_group_leave(group);
+        });
+    };
+
+    addScanner(^NSArray<NSMutableDictionary *> *{ return [self pathBinaries]; });
+    addScanner(^NSArray<NSMutableDictionary *> *{ return [self brewItemsWithCasks:NO]; });
+    addScanner(^NSArray<NSMutableDictionary *> *{ return [self brewItemsWithCasks:YES]; });
+    addScanner(^NSArray<NSMutableDictionary *> *{ return [self npmGlobals]; });
+    addScanner(^NSArray<NSMutableDictionary *> *{ return [self bunGlobals]; });
+    addScanner(^NSArray<NSMutableDictionary *> *{ return [self uvTools]; });
+    dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
 
     for (NSMutableDictionary *item in all) {
         NSString *key = [NSString stringWithFormat:@"%@:%@", item[@"source"], item[@"name"]];
@@ -438,7 +452,7 @@ static NSString *DefaultTerminalName(void) {
     self.preferredTerminal = savedTerminal.length > 0 ? savedTerminal : DefaultTerminalName();
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
     self.statusItem.button.title = @"";
-    self.statusItem.button.toolTip = @"CLI Ticker";
+    self.statusItem.button.toolTip = @"CLI";
     NSString *statusIconPath = [[NSBundle mainBundle] pathForResource:@"CLIStatusTemplate" ofType:@"png"];
     NSImage *statusIcon = statusIconPath ? [[NSImage alloc] initWithContentsOfFile:statusIconPath] : nil;
     if (statusIcon) {
@@ -498,7 +512,7 @@ static NSString *DefaultTerminalName(void) {
     formatter.timeStyle = NSDateFormatterMediumStyle;
 
     NSMutableString *markdown = [NSMutableString string];
-    [markdown appendString:@"# CLI Ticker Report\n\n"];
+    [markdown appendString:@"# CLI Report\n\n"];
     [markdown appendFormat:@"Generated: %@\n\n", [formatter stringFromDate:[NSDate date]]];
     [markdown appendFormat:@"- Total CLIs: %lu\n", self.items.count];
     [markdown appendFormat:@"- Outdated: %lu\n", outdated];
@@ -709,7 +723,7 @@ static NSString *DefaultTerminalName(void) {
     if (command.length == 0) {
         NSAlert *unsupported = [[NSAlert alloc] init];
         unsupported.messageText = @"Update Not Supported";
-        unsupported.informativeText = @"CLI Ticker can apply Homebrew and global npm updates from the menu. Use the package manager directly for this source.";
+        unsupported.informativeText = @"CLI can apply Homebrew and global npm updates from the menu. Use the package manager directly for this source.";
         [unsupported addButtonWithTitle:@"OK"];
         [unsupported runModal];
         return;
@@ -718,7 +732,7 @@ static NSString *DefaultTerminalName(void) {
     if (confirm) {
         NSAlert *confirmAlert = [[NSAlert alloc] init];
         confirmAlert.messageText = [NSString stringWithFormat:@"Update %@?", item[@"name"] ?: @"this CLI"];
-        confirmAlert.informativeText = [NSString stringWithFormat:@"CLI Ticker will open %@ and run:\n\n%@", self.preferredTerminal ?: DefaultTerminalName(), command];
+        confirmAlert.informativeText = [NSString stringWithFormat:@"CLI will open %@ and run:\n\n%@", self.preferredTerminal ?: DefaultTerminalName(), command];
         [confirmAlert addButtonWithTitle:@"Update"];
         [confirmAlert addButtonWithTitle:@"Cancel"];
         if ([confirmAlert runModal] != NSAlertFirstButtonReturn) return;
@@ -761,14 +775,14 @@ static NSString *DefaultTerminalName(void) {
     NSString *command = [self updateCommandForItem:item];
     if (command.length == 0) return nil;
 
-    NSString *title = [NSString stringWithFormat:@"CLI Ticker - Update %@", item[@"name"] ?: @"CLI"];
+    NSString *title = [NSString stringWithFormat:@"CLI - Update %@", item[@"name"] ?: @"CLI"];
     NSString *markerPath = self.updateRefreshRequestURL.path ?: @"";
     NSString *markerDir = markerPath.stringByDeletingLastPathComponent;
     NSString *escapedCommand = [command stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
     NSString *escapedTitle = [title stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
     NSString *escapedMarkerDir = [markerDir stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
     NSString *escapedMarkerPath = [markerPath stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
-    return [NSString stringWithFormat:@"printf '\\033]0;%@\\007'; echo 'Running %@'; echo; %@; status=$?; if [ $status -eq 0 ]; then mkdir -p '%@'; touch '%@'; fi; echo; echo \"Update finished with exit code $status.\"; echo 'CLI Ticker will refresh Updates Available automatically after successful updates.'; echo 'Press Return to close this session.'; read _; exec ${SHELL:-/bin/zsh} -l", escapedTitle, escapedCommand, command, escapedMarkerDir, escapedMarkerPath];
+    return [NSString stringWithFormat:@"printf '\\033]0;%@\\007'; echo 'Running %@'; echo; %@; status=$?; if [ $status -eq 0 ]; then mkdir -p '%@'; touch '%@'; fi; echo; echo \"Update finished with exit code $status.\"; echo 'CLI will refresh Updates Available automatically after successful updates.'; echo 'Press Return to close this session.'; read _; exec ${SHELL:-/bin/zsh} -l", escapedTitle, escapedCommand, command, escapedMarkerDir, escapedMarkerPath];
 }
 
 - (NSString *)displayNameForItem:(NSDictionary *)item {
@@ -804,6 +818,8 @@ static NSString *DefaultTerminalName(void) {
     if ([canonicalName isEqualToString:@"claude"] && [name isEqualToString:@"@anthropic-ai/claude-code"]) return 120;
     if ([canonicalName isEqualToString:@"amp"] && [name isEqualToString:@"@sourcegraph/amp"]) return 120;
     if ([canonicalName isEqualToString:@"pi"] && [name isEqualToString:@"@mariozechner/pi-coding-agent"]) return 120;
+    if ([canonicalName isEqualToString:@"notion"] && [name isEqualToString:@"notionctl"]) return 120;
+    if ([canonicalName isEqualToString:@"notion"] && [name isEqualToString:@"notion"]) return 115;
     if ([canonicalName isEqualToString:@"goose"] && [name isEqualToString:@"block-goose-cli"]) return 115;
     if ([canonicalName isEqualToString:@"kisuke"] && [name isEqualToString:@"kisuke-cli-dev"]) return 115;
 
@@ -882,7 +898,7 @@ static NSString *DefaultTerminalName(void) {
     NSDictionary *commands = @{
         @"coderabbit": @"coderabbit",
         @"cursor-agent": @"cursor-agent",
-        @"notion": @"ntn",
+        @"notion": @"notion",
         @"opencode": @"opencode"
     };
     NSString *command = commands[canonicalName] ?: canonicalName;
@@ -909,7 +925,7 @@ static NSString *DefaultTerminalName(void) {
     NSString *command = [self commandForAgentItem:item];
     NSString *label = [self friendlyAgentName:[self displayNameForItem:item]];
     NSString *escapedCommand = [command stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
-    return [NSString stringWithFormat:@"printf '\\033]0;CLI Ticker - %@\\007'; echo 'Launching %@'; echo; '%@'; echo; echo 'Session finished. Close this window or continue using the shell.'; exec ${SHELL:-/bin/zsh} -l", label, label, escapedCommand];
+    return [NSString stringWithFormat:@"printf '\\033]0;CLI - %@\\007'; echo 'Launching %@'; echo; '%@'; echo; echo 'Session finished. Close this window or continue using the shell.'; exec ${SHELL:-/bin/zsh} -l", label, label, escapedCommand];
 }
 
 - (NSString *)commandForCLIItem:(NSDictionary *)item {
@@ -925,6 +941,7 @@ static NSString *DefaultTerminalName(void) {
     NSString *displayName = [self displayNameForItem:item];
     if ([displayName isEqualToString:@"coderabbit"]) return @"coderabbit";
     if ([displayName isEqualToString:@"cursor-agent"]) return @"cursor-agent";
+    if ([displayName isEqualToString:@"notion"]) return @"notion";
     if ([displayName isEqualToString:@"opencode"]) return @"opencode";
     if ([AgentToolNames() containsObject:displayName]) return displayName;
 
@@ -939,7 +956,7 @@ static NSString *DefaultTerminalName(void) {
     if (label.length == 0) label = item[@"name"] ?: @"CLI";
     NSString *escapedCommand = [command stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
     NSString *escapedLabel = [label stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
-    return [NSString stringWithFormat:@"printf '\\033]0;CLI Ticker - %@\\007'; echo 'Launching %@'; echo; '%@'; echo; echo 'Session finished. Close this window or continue using the shell.'; exec ${SHELL:-/bin/zsh} -l", escapedLabel, escapedLabel, escapedCommand];
+    return [NSString stringWithFormat:@"printf '\\033]0;CLI - %@\\007'; echo 'Launching %@'; echo; '%@'; echo; echo 'Session finished. Close this window or continue using the shell.'; exec ${SHELL:-/bin/zsh} -l", escapedLabel, escapedLabel, escapedCommand];
 }
 
 - (NSArray<NSString *> *)availableTerminals {
@@ -1015,17 +1032,42 @@ static NSString *DefaultTerminalName(void) {
         NSGlassEffectView *glass = [[NSGlassEffectView alloc] initWithFrame:frame];
         glass.style = NSGlassEffectViewStyleRegular;
         glass.cornerRadius = 18;
-        glass.tintColor = [NSColor colorWithCalibratedRed:0.18 green:0.34 blue:0.92 alpha:0.16];
+        glass.tintColor = [NSColor colorWithCalibratedRed:0.06 green:0.12 blue:0.28 alpha:0.34];
+        glass.wantsLayer = YES;
+        glass.layer.borderWidth = 1.0;
+        glass.layer.borderColor = [[NSColor colorWithCalibratedWhite:1.0 alpha:0.18] CGColor];
+        glass.layer.shadowColor = [[NSColor blackColor] CGColor];
+        glass.layer.shadowOpacity = 0.22;
+        glass.layer.shadowRadius = 14.0;
+        glass.layer.shadowOffset = NSMakeSize(0, -5);
 
         NSView *content = [[NSView alloc] initWithFrame:frame];
         content.wantsLayer = YES;
+        content.layer.cornerRadius = 18;
+        content.layer.masksToBounds = YES;
+        content.layer.backgroundColor = [[NSColor colorWithCalibratedRed:0.03 green:0.07 blue:0.16 alpha:0.24] CGColor];
         glass.contentView = content;
 
+        NSView *topSheen = [[NSView alloc] initWithFrame:NSMakeRect(1, 40, 328, 41)];
+        topSheen.wantsLayer = YES;
+        topSheen.layer.backgroundColor = [[NSColor colorWithCalibratedWhite:1.0 alpha:0.09] CGColor];
+        topSheen.layer.cornerRadius = 17;
+        [content addSubview:topSheen];
+
+        NSView *bottomDepth = [[NSView alloc] initWithFrame:NSMakeRect(1, 1, 328, 31)];
+        bottomDepth.wantsLayer = YES;
+        bottomDepth.layer.backgroundColor = [[NSColor colorWithCalibratedRed:0.0 green:0.02 blue:0.07 alpha:0.12] CGColor];
+        bottomDepth.layer.cornerRadius = 17;
+        [content addSubview:bottomDepth];
+
         NSString *state = self.refreshing ? @"Refreshing inventory…" : @"Local CLI inventory";
-        [content addSubview:GlassLabel(@"CLI Ticker", NSMakeRect(18, 49, 185, 22), [NSFont boldSystemFontOfSize:17], [NSColor labelColor], NSTextAlignmentLeft)];
-        [content addSubview:GlassLabel(state, NSMakeRect(18, 30, 185, 18), [NSFont systemFontOfSize:12 weight:NSFontWeightMedium], [NSColor secondaryLabelColor], NSTextAlignmentLeft)];
-        [content addSubview:GlassLabel([NSString stringWithFormat:@"%lu CLIs", self.items.count], NSMakeRect(218, 51, 92, 16), [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightSemibold], [NSColor labelColor], NSTextAlignmentRight)];
-        [content addSubview:GlassLabel([NSString stringWithFormat:@"%lu updates", outdated], NSMakeRect(218, 32, 92, 16), [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular], outdated > 0 ? [NSColor systemOrangeColor] : [NSColor secondaryLabelColor], NSTextAlignmentRight)];
+        NSColor *primaryText = [NSColor colorWithCalibratedWhite:0.96 alpha:1.0];
+        NSColor *secondaryText = [NSColor colorWithCalibratedWhite:0.76 alpha:1.0];
+        [content addSubview:GlassLabel(@"CLI", NSMakeRect(18, 49, 185, 22), [NSFont boldSystemFontOfSize:17], primaryText, NSTextAlignmentLeft)];
+        [content addSubview:GlassLabel(state, NSMakeRect(18, 30, 185, 18), [NSFont systemFontOfSize:12 weight:NSFontWeightMedium], secondaryText, NSTextAlignmentLeft)];
+        [content addSubview:GlassLabel([NSString stringWithFormat:@"%lu CLIs", self.items.count], NSMakeRect(218, 51, 92, 16), [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightSemibold], primaryText, NSTextAlignmentRight)];
+        NSColor *updateText = outdated > 0 ? [NSColor colorWithCalibratedRed:1.0 green:0.58 blue:0.20 alpha:1.0] : secondaryText;
+        [content addSubview:GlassLabel([NSString stringWithFormat:@"%lu updates", outdated], NSMakeRect(218, 32, 92, 16), [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular], updateText, NSTextAlignmentRight)];
 
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:@"" action:nil keyEquivalent:@""];
         item.view = glass;

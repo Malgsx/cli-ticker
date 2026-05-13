@@ -1,8 +1,8 @@
-# CLI Ticker
+# CLI
 
-CLI Ticker is a native macOS menu bar app for tracking command-line tools installed on a machine. It scans local package managers and executable paths, groups known AI agent CLIs, and shows available updates without requiring an account.
+CLI is a native macOS menu bar app for tracking command-line tools installed on a machine. It scans local package managers and executable paths, groups known AI agent CLIs, and shows available updates without requiring an account.
 
-![CLI Ticker icon](Assets/AppIcon/CLITickerIcon-1024.png)
+![CLI icon](Assets/AppIcon/CLITickerIcon-1024.png)
 
 ## Install
 
@@ -33,7 +33,7 @@ open "$HOME/Applications/CLITicker.app"
 
 ## Local Scanning
 
-CLI Ticker currently scans:
+CLI currently scans:
 
 - Non-system executable directories in `PATH`.
 - Homebrew formulas and casks.
@@ -49,7 +49,7 @@ Reports are written locally:
 
 ## Privacy
 
-CLI Ticker stores inventory reports locally only. It shells out to installed local package managers to read versions and update availability. Homebrew auto-update and analytics are disabled for app-launched Homebrew commands.
+CLI stores inventory reports locally only. It shells out to installed local package managers to read versions and update availability. Homebrew auto-update and analytics are disabled for app-launched Homebrew commands.
 
 No remote account, telemetry endpoint, or server sync is built into this version. Future API adapters should be opt-in and documented clearly.
 

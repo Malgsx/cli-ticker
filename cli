@@ -6,8 +6,8 @@ usage() {
 Usage: ./cli <command>
 
 Commands:
-  run     Build and open CLI Ticker
-  build   Build CLI Ticker
+  run     Build and open CLI
+  build   Build CLI
   dist    Build the distributable archive
   clean   Remove build artifacts
 EOF

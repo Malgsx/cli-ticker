@@ -11,7 +11,7 @@ command -v tar >/dev/null || { echo "tar is required" >&2; exit 1; }
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
-echo "Fetching latest CLI Ticker release from github.com/$REPO..."
+echo "Fetching latest CLI release from github.com/$REPO..."
 api_url="https://api.github.com/repos/$REPO/releases"
 asset_url="$(curl -fsSL "$api_url" | /usr/bin/python3 -c '
 import json, sys

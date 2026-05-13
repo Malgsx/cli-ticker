@@ -27,7 +27,7 @@ $(BIN): Sources/CLITickerObjC/main.m $(ICON)
 	'<dict>' \
 	'  <key>CFBundleExecutable</key><string>$(APP_NAME)</string>' \
 	'  <key>CFBundleIdentifier</key><string>local.codex.cliticker</string>' \
-	'  <key>CFBundleName</key><string>CLI Ticker</string>' \
+	'  <key>CFBundleName</key><string>CLI</string>' \
 	'  <key>CFBundlePackageType</key><string>APPL</string>' \
 	'  <key>CFBundleIconFile</key><string>CLITicker</string>' \
 	'  <key>CFBundleVersion</key><string>0.1.1</string>' \

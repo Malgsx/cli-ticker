@@ -1,6 +1,6 @@
 # Contributing
 
-CLI Ticker is intended to be easy to fork and customize.
+CLI is intended to be easy to fork and customize.
 
 ## Local Setup
 
