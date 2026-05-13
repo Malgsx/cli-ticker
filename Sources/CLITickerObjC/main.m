@@ -73,6 +73,7 @@ static NSSet<NSString *> *AgentToolNames(void) {
             @"hermes",
             @"kisuke",
             @"notion",
+            @"ntn",
             @"opencode",
             @"pi",
             @"spawn",
@@ -114,7 +115,8 @@ static NSDictionary<NSString *, NSString *> *PackageAliases(void) {
             @"@mariozechner/pi-coding-agent": @"pi",
             @"block-goose-cli": @"goose",
             @"kisuke-cli-dev": @"kisuke",
-            @"notionctl": @"notion"
+            @"notionctl": @"notion",
+            @"ntn": @"notion"
         };
     });
     return aliases;
@@ -819,7 +821,8 @@ static NSString *DefaultTerminalName(void) {
     if ([canonicalName isEqualToString:@"amp"] && [name isEqualToString:@"@sourcegraph/amp"]) return 120;
     if ([canonicalName isEqualToString:@"pi"] && [name isEqualToString:@"@mariozechner/pi-coding-agent"]) return 120;
     if ([canonicalName isEqualToString:@"notion"] && [name isEqualToString:@"notionctl"]) return 120;
-    if ([canonicalName isEqualToString:@"notion"] && [name isEqualToString:@"notion"]) return 115;
+    if ([canonicalName isEqualToString:@"notion"] && [name isEqualToString:@"ntn"]) return 120;
+    if ([canonicalName isEqualToString:@"notion"] && [name isEqualToString:@"notion"]) return 110;
     if ([canonicalName isEqualToString:@"goose"] && [name isEqualToString:@"block-goose-cli"]) return 115;
     if ([canonicalName isEqualToString:@"kisuke"] && [name isEqualToString:@"kisuke-cli-dev"]) return 115;
 
@@ -898,7 +901,7 @@ static NSString *DefaultTerminalName(void) {
     NSDictionary *commands = @{
         @"coderabbit": @"coderabbit",
         @"cursor-agent": @"cursor-agent",
-        @"notion": @"notion",
+        @"notion": @"ntn",
         @"opencode": @"opencode"
     };
     NSString *command = commands[canonicalName] ?: canonicalName;
@@ -941,7 +944,7 @@ static NSString *DefaultTerminalName(void) {
     NSString *displayName = [self displayNameForItem:item];
     if ([displayName isEqualToString:@"coderabbit"]) return @"coderabbit";
     if ([displayName isEqualToString:@"cursor-agent"]) return @"cursor-agent";
-    if ([displayName isEqualToString:@"notion"]) return @"notion";
+    if ([displayName isEqualToString:@"notion"]) return @"ntn";
     if ([displayName isEqualToString:@"opencode"]) return @"opencode";
     if ([AgentToolNames() containsObject:displayName]) return displayName;
 
