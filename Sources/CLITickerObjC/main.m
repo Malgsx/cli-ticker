@@ -61,9 +61,11 @@ static NSSet<NSString *> *AgentToolNames(void) {
     dispatch_once(&onceToken, ^{
         names = [NSSet setWithArray:@[
             @"agent",
+            @"antigravity",
             @"amp",
             @"claude",
             @"codex",
+            @"cora",
             @"coderabbit",
             @"cr",
             @"cursor",
@@ -87,8 +89,10 @@ static NSArray<NSString *> *PreferredAgentOrder(void) {
     return @[
         @"codex",
         @"notion",
+        @"antigravity",
         @"claude",
         @"amp",
+        @"cora",
         @"cursor",
         @"cursor-agent",
         @"goose",
@@ -110,6 +114,7 @@ static NSDictionary<NSString *, NSString *> *PackageAliases(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         aliases = @{
+            @"agy": @"antigravity",
             @"@anthropic-ai/claude-code": @"claude",
             @"@sourcegraph/amp": @"amp",
             @"@mariozechner/pi-coding-agent": @"pi",
@@ -128,8 +133,10 @@ static NSDictionary<NSString *, NSDictionary *> *AgentBrandMetadata(void) {
     dispatch_once(&onceToken, ^{
         metadata = @{
             @"codex": @{@"label": @"Codex", @"mark": @"CX", @"color": [NSColor colorWithCalibratedRed:0.10 green:0.55 blue:0.42 alpha:1.0]},
+            @"antigravity": @{@"label": @"Antigravity", @"mark": @"AG", @"color": [NSColor colorWithCalibratedRed:0.16 green:0.48 blue:0.92 alpha:1.0]},
             @"claude": @{@"label": @"Claude", @"mark": @"C", @"color": [NSColor colorWithCalibratedRed:0.78 green:0.34 blue:0.18 alpha:1.0]},
             @"amp": @{@"label": @"Amp", @"mark": @"A", @"color": [NSColor colorWithCalibratedRed:0.42 green:0.27 blue:0.86 alpha:1.0]},
+            @"cora": @{@"label": @"Cora", @"mark": @"CO", @"color": [NSColor colorWithCalibratedRed:0.08 green:0.56 blue:0.74 alpha:1.0]},
             @"cursor": @{@"label": @"Cursor", @"mark": @"⌘", @"color": [NSColor colorWithCalibratedWhite:0.12 alpha:1.0]},
             @"cursor-agent": @{@"label": @"Cursor Agent", @"mark": @"CA", @"color": [NSColor colorWithCalibratedWhite:0.12 alpha:1.0]},
             @"goose": @{@"label": @"Goose", @"mark": @"G", @"color": [NSColor colorWithCalibratedRed:0.12 green:0.44 blue:0.82 alpha:1.0]},
@@ -152,6 +159,7 @@ static NSDictionary<NSString *, NSDictionary *> *AgentBrandMetadata(void) {
 static NSImage *AgentIcon(NSString *canonicalName) {
     NSDictionary *logoFiles = @{
         @"codex": @"codex",
+        @"antigravity": @"antigravity",
         @"claude": @"anthropic",
         @"amp": @"sourcegraph",
         @"cursor": @"cursor",
@@ -759,8 +767,15 @@ static NSString *DefaultTerminalName(void) {
 - (NSString *)updateCommandForItem:(NSDictionary *)item {
     NSString *source = item[@"source"] ?: @"";
     NSString *name = item[@"name"] ?: @"";
+    NSString *displayName = [self displayNameForItem:item];
     if (name.length == 0) return nil;
 
+    if ([displayName isEqualToString:@"cora"]) {
+        return @"curl -fsSL https://cora.computer/install | bash";
+    }
+    if ([displayName isEqualToString:@"antigravity"]) {
+        return @"curl -fsSL https://antigravity.google/cli/install.sh | bash";
+    }
     if ([source isEqualToString:@"Homebrew"]) {
         return [NSString stringWithFormat:@"brew upgrade %@", name];
     }
@@ -818,7 +833,9 @@ static NSString *DefaultTerminalName(void) {
     NSString *name = item[@"name"] ?: @"";
 
     if ([canonicalName isEqualToString:@"claude"] && [name isEqualToString:@"@anthropic-ai/claude-code"]) return 120;
+    if ([canonicalName isEqualToString:@"antigravity"] && [name isEqualToString:@"agy"]) return 120;
     if ([canonicalName isEqualToString:@"amp"] && [name isEqualToString:@"@sourcegraph/amp"]) return 120;
+    if ([canonicalName isEqualToString:@"cora"] && [name isEqualToString:@"cora"]) return 120;
     if ([canonicalName isEqualToString:@"pi"] && [name isEqualToString:@"@mariozechner/pi-coding-agent"]) return 120;
     if ([canonicalName isEqualToString:@"notion"] && [name isEqualToString:@"notionctl"]) return 120;
     if ([canonicalName isEqualToString:@"notion"] && [name isEqualToString:@"ntn"]) return 120;
@@ -901,6 +918,7 @@ static NSString *DefaultTerminalName(void) {
     NSDictionary *commands = @{
         @"coderabbit": @"coderabbit",
         @"cursor-agent": @"cursor-agent",
+        @"antigravity": @"agy",
         @"notion": @"ntn",
         @"opencode": @"opencode"
     };
@@ -944,6 +962,7 @@ static NSString *DefaultTerminalName(void) {
     NSString *displayName = [self displayNameForItem:item];
     if ([displayName isEqualToString:@"coderabbit"]) return @"coderabbit";
     if ([displayName isEqualToString:@"cursor-agent"]) return @"cursor-agent";
+    if ([displayName isEqualToString:@"antigravity"]) return @"agy";
     if ([displayName isEqualToString:@"notion"]) return @"ntn";
     if ([displayName isEqualToString:@"opencode"]) return @"opencode";
     if ([AgentToolNames() containsObject:displayName]) return displayName;
