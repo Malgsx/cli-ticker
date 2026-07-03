@@ -4,15 +4,20 @@ APP_DIR := $(BUILD_DIR)/$(APP_NAME).app
 BIN := $(APP_DIR)/Contents/MacOS/$(APP_NAME)
 ICON := Assets/AppIcon/CLITicker.icns
 
-.PHONY: all run dist clean
+.PHONY: all run dist clean icons
 
 all: $(BIN)
 
-$(ICON): scripts/generate_icon_assets.py
+# Regenerating icons needs python3 + Pillow, so it only happens when the
+# committed .icns is missing. Run `make icons` to force a regeneration.
+icons:
 	python3 scripts/generate_icon_assets.py
 	iconutil -c icns Assets/AppIcon/CLITicker.iconset -o "$(ICON)"
 
-$(BIN): Sources/CLITickerObjC/main.m $(ICON)
+$(ICON):
+	$(MAKE) icons
+
+$(BIN): Sources/CLITickerObjC/main.m | $(ICON)
 	mkdir -p "$(APP_DIR)/Contents/MacOS"
 	mkdir -p "$(APP_DIR)/Contents/Resources"
 	mkdir -p "$(APP_DIR)/Contents/Resources/Logos"
@@ -36,7 +41,10 @@ $(BIN): Sources/CLITickerObjC/main.m $(ICON)
 	'</dict>' \
 	'</plist>' > "$(APP_DIR)/Contents/Info.plist"
 
+# Quit any running copy first so the freshly built app actually replaces it;
+# `open` alone would just re-activate the old instance with the old menus.
 run: all
+	@pkill -x $(APP_NAME) 2>/dev/null || true
 	open "$(APP_DIR)"
 
 dist: all

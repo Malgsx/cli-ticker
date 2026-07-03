@@ -66,11 +66,17 @@ No remote account, telemetry endpoint, or server sync is built into this version
 
 ## Run Locally
 
+From the repository root:
+
 ```sh
 ./cli run
 ```
 
+This builds the app (requires only the Xcode Command Line Tools: `xcode-select --install`), quits any running copy so the fresh build replaces it, and opens the new one. Icons are only regenerated when the committed `.icns` file is missing, so Python/Pillow is not needed for a normal build — run `make icons` if you want to regenerate them.
+
 The first refresh can take a while because Homebrew and npm update checks shell out to local package managers.
+
+Note: the `Updates Available` submenu (and its `Update All` action) only appears when at least one scanned tool is outdated. If everything is current, the section is hidden until the next update is detected.
 
 ## Build The App
 

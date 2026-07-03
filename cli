@@ -13,16 +13,27 @@ Commands:
 EOF
 }
 
+require_build_tools() {
+    if ! command -v clang >/dev/null 2>&1; then
+        echo "clang is required to build CLI. Install the Xcode Command Line Tools with:" >&2
+        echo "  xcode-select --install" >&2
+        exit 1
+    fi
+}
+
 command="${1:-}"
 
 case "$command" in
     run)
+        require_build_tools
         make run
         ;;
     build)
+        require_build_tools
         make
         ;;
     dist)
+        require_build_tools
         make dist
         ;;
     clean)
