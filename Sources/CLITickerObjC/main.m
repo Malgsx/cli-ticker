@@ -46,6 +46,33 @@ static NSString *CommandPath(NSString *name) {
     return path.length > 0 ? path : nil;
 }
 
+// Runs a shell command non-interactively, streaming stdout/stderr to the log
+// handle so long-running package manager output cannot fill a pipe buffer.
+static int RunLoggedCommand(NSString *command, NSFileHandle *logHandle) {
+    NSTask *task = [[NSTask alloc] init];
+    task.launchPath = @"/usr/bin/env";
+    task.arguments = @[@"zsh", @"-lc", command];
+    NSMutableDictionary *environment = [[[NSProcessInfo processInfo] environment] mutableCopy];
+    environment[@"HOMEBREW_NO_AUTO_UPDATE"] = @"1";
+    environment[@"HOMEBREW_NO_ANALYTICS"] = @"1";
+    environment[@"HOMEBREW_NO_INSTALL_CLEANUP"] = @"1";
+    environment[@"HOMEBREW_NO_ENV_HINTS"] = @"1";
+    environment[@"NONINTERACTIVE"] = @"1";
+    task.environment = environment;
+    NSFileHandle *sink = logHandle ?: [NSFileHandle fileHandleWithNullDevice];
+    task.standardOutput = sink;
+    task.standardError = sink;
+    task.standardInput = [NSFileHandle fileHandleWithNullDevice];
+
+    @try {
+        [task launch];
+        [task waitUntilExit];
+    } @catch (NSException *exception) {
+        return -1;
+    }
+    return task.terminationStatus;
+}
+
 static NSMutableDictionary *Item(NSString *name, NSString *current, NSString *latest, NSString *source, NSString *path, NSString *status) {
     NSMutableDictionary *item = [NSMutableDictionary dictionary];
     item[@"name"] = name ?: @"";
@@ -475,11 +502,15 @@ static NSString *AgentInvocationName(NSString *canonicalName) {
 @property InventoryService *service;
 @property NSArray<NSDictionary *> *items;
 @property BOOL refreshing;
+@property BOOL updating;
+@property NSUInteger updateTotal;
+@property NSUInteger updateCompleted;
+@property NSString *currentUpdateCommand;
+@property NSString *lastUpdateSummary;
 @property NSURL *reportURL;
 @property NSURL *markdownReportURL;
 @property NSURL *changesURL;
-@property NSURL *updateRefreshRequestURL;
-@property NSDate *lastHandledUpdateRefreshDate;
+@property NSURL *updateLogURL;
 @property NSString *preferredTerminal;
 @property NSArray<NSDictionary *> *recentChanges;
 @property (assign) FSEventStreamRef installWatchStream;
@@ -530,9 +561,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     self.reportURL = [dir URLByAppendingPathComponent:@"inventory.json"];
     self.markdownReportURL = [dir URLByAppendingPathComponent:@"inventory.md"];
     self.changesURL = [dir URLByAppendingPathComponent:@"changes.json"];
-    self.updateRefreshRequestURL = [dir URLByAppendingPathComponent:@"update-refresh-request"];
-    NSDictionary *markerAttributes = [[NSFileManager defaultManager] attributesOfItemAtPath:self.updateRefreshRequestURL.path error:nil];
-    self.lastHandledUpdateRefreshDate = markerAttributes[NSFileModificationDate];
+    self.updateLogURL = [dir URLByAppendingPathComponent:@"updates.log"];
     self.recentChanges = @[];
     [self loadReport];
     [self loadRecentChanges];
@@ -541,7 +570,6 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     [self startInstallWatcher];
 
     [NSTimer scheduledTimerWithTimeInterval:15 * 60 target:self selector:@selector(refresh:) userInfo:nil repeats:YES];
-    [NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(checkForUpdateRefreshRequest:) userInfo:nil repeats:YES];
     return self;
 }
 
@@ -750,7 +778,9 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 
 - (void)watcherRefreshFired:(NSTimer *)timer {
     self.watcherRefreshTimer = nil;
-    if (self.refreshing) {
+    // Hold off while a scan or background update run is in flight; the update
+    // run triggers its own refresh when it finishes.
+    if (self.refreshing || self.updating) {
         [self scheduleWatcherRefresh];
         return;
     }
@@ -856,6 +886,9 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 }
 
 - (NSString *)summaryTitle {
+    if (self.updating) {
+        return [NSString stringWithFormat:@"Updating %lu of %lu CLIs…", MIN(self.updateCompleted + 1, self.updateTotal), self.updateTotal];
+    }
     if (self.items.count == 0) return @"No scan yet";
     return [NSString stringWithFormat:@"%lu CLIs scanned, %lu outdated, %lu unknown",
         self.items.count, [self countWithStatus:StatusOutdated], [self countWithStatus:StatusUnknown]];
@@ -986,6 +1019,16 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     return column;
 }
 
+- (BOOL)ensureNotAlreadyUpdating {
+    if (!self.updating) return YES;
+    NSAlert *busy = [[NSAlert alloc] init];
+    busy.messageText = @"Updates Already Running";
+    busy.informativeText = @"CLI is still applying updates in the background. Progress is shown in the Updates Available menu.";
+    [busy addButtonWithTitle:@"OK"];
+    [busy runModal];
+    return NO;
+}
+
 - (void)runUpdateForItem:(NSDictionary *)item confirm:(BOOL)confirm {
     NSString *command = [self updateCommandForItem:item];
     if (command.length == 0) {
@@ -996,18 +1039,18 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         [unsupported runModal];
         return;
     }
+    if (![self ensureNotAlreadyUpdating]) return;
 
     if (confirm) {
         NSAlert *confirmAlert = [[NSAlert alloc] init];
         confirmAlert.messageText = [NSString stringWithFormat:@"Update %@?", item[@"name"] ?: @"this CLI"];
-        confirmAlert.informativeText = [NSString stringWithFormat:@"CLI will open %@ and run:\n\n%@", self.preferredTerminal ?: DefaultTerminalName(), command];
+        confirmAlert.informativeText = @"The update runs quietly in the background — no terminal windows. The tool is removed from Updates Available once it is current.";
         [confirmAlert addButtonWithTitle:@"Update"];
         [confirmAlert addButtonWithTitle:@"Cancel"];
         if ([confirmAlert runModal] != NSAlertFirstButtonReturn) return;
     }
 
-    NSString *terminalCommand = [self updateTerminalCommandForItem:item];
-    [self runShellCommand:terminalCommand inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
+    [self runUpdateCommandsInBackground:@[command]];
 }
 
 - (void)reloadAllUpdatesDialog {
@@ -1018,7 +1061,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     [self.allUpdatesTableView reloadData];
     self.allUpdatesAlert.messageText = [NSString stringWithFormat:@"All Updates Available (%lu)", updates.count];
     self.allUpdatesAlert.informativeText = updates.count > 0
-        ? [NSString stringWithFormat:@"Double-click an update to run it in %@.", self.preferredTerminal ?: DefaultTerminalName()]
+        ? @"Double-click an update to run it quietly in the background."
         : @"All visible updates are current.";
 }
 
@@ -1046,20 +1089,6 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     return nil;
 }
 
-- (NSString *)updateTerminalCommandForItem:(NSDictionary *)item {
-    NSString *command = [self updateCommandForItem:item];
-    if (command.length == 0) return nil;
-
-    NSString *title = [NSString stringWithFormat:@"CLI - Update %@", item[@"name"] ?: @"CLI"];
-    NSString *markerPath = self.updateRefreshRequestURL.path ?: @"";
-    NSString *markerDir = markerPath.stringByDeletingLastPathComponent;
-    NSString *escapedCommand = ShellSingleQuoteEscaped(command);
-    NSString *escapedTitle = ShellSingleQuoteEscaped(title);
-    NSString *escapedMarkerDir = ShellSingleQuoteEscaped(markerDir);
-    NSString *escapedMarkerPath = ShellSingleQuoteEscaped(markerPath);
-    return [NSString stringWithFormat:@"printf '\\033]0;%@\\007'; echo 'Running %@'; echo; %@; status=$?; if [ $status -eq 0 ]; then mkdir -p '%@'; touch '%@'; fi; echo; echo \"Update finished with exit code $status.\"; echo 'CLI will refresh Updates Available automatically after successful updates.'; echo 'Press Return to close this session.'; read _; exec ${SHELL:-/bin/zsh} -l", escapedTitle, escapedCommand, command, escapedMarkerDir, escapedMarkerPath];
-}
-
 // Unique update commands for every outdated tool that supports in-app updates.
 - (NSArray<NSString *> *)allUpdateCommands {
     NSMutableArray<NSString *> *commands = [NSMutableArray array];
@@ -1073,24 +1102,8 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     return commands;
 }
 
-- (NSString *)updateAllTerminalCommandWithCommands:(NSArray<NSString *> *)commands {
-    NSString *markerPath = self.updateRefreshRequestURL.path ?: @"";
-    NSString *markerDir = markerPath.stringByDeletingLastPathComponent;
-
-    NSMutableString *script = [NSMutableString string];
-    [script appendFormat:@"printf '\\033]0;CLI - Update All\\007'; echo 'Running %lu updates'; echo; failed=0; ", commands.count];
-    for (NSString *command in commands) {
-        [script appendFormat:@"echo '==> %@'; %@ || failed=$((failed+1)); echo; ", ShellSingleQuoteEscaped(command), command];
-    }
-    // Touch the marker even on partial failure so the app rescans and removes
-    // whichever tools did update from the Updates Available list.
-    [script appendFormat:@"mkdir -p '%@'; touch '%@'; ", ShellSingleQuoteEscaped(markerDir), ShellSingleQuoteEscaped(markerPath)];
-    [script appendFormat:@"if [ $failed -eq 0 ]; then echo 'All %lu updates finished successfully.'; else echo \"$failed of %lu updates failed.\"; fi; ", commands.count, commands.count];
-    [script appendString:@"echo 'CLI will remove updated tools from Updates Available automatically.'; echo 'Press Return to close this session.'; read _; exec ${SHELL:-/bin/zsh} -l"];
-    return script;
-}
-
 - (void)updateAll:(id)sender {
+    if (![self ensureNotAlreadyUpdating]) return;
     NSArray<NSString *> *commands = [self allUpdateCommands];
     if (commands.count == 0) {
         NSAlert *unsupported = [[NSAlert alloc] init];
@@ -1103,13 +1116,60 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 
     NSAlert *confirmAlert = [[NSAlert alloc] init];
     confirmAlert.messageText = [NSString stringWithFormat:@"Update all %lu CLIs?", commands.count];
-    confirmAlert.informativeText = [NSString stringWithFormat:@"CLI will open %@ and run:\n\n%@", self.preferredTerminal ?: DefaultTerminalName(), [commands componentsJoinedByString:@"\n"]];
+    confirmAlert.informativeText = @"Updates run quietly in the background — no terminal windows. Progress appears in the Updates Available menu, updated tools are removed from the list automatically, and output is saved to updates.log.";
     [confirmAlert addButtonWithTitle:@"Update All"];
     [confirmAlert addButtonWithTitle:@"Cancel"];
     if ([confirmAlert runModal] != NSAlertFirstButtonReturn) return;
 
-    NSString *terminalCommand = [self updateAllTerminalCommandWithCommands:commands];
-    [self runShellCommand:terminalCommand inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
+    [self runUpdateCommandsInBackground:commands];
+}
+
+// Applies updates sequentially off the main thread. No terminal windows are
+// opened; output goes to updates.log and menu progress updates as each
+// command finishes. A rescan afterwards prunes updated tools from the list.
+- (void)runUpdateCommandsInBackground:(NSArray<NSString *> *)commands {
+    if (self.updating || commands.count == 0) return;
+    self.updating = YES;
+    self.updateTotal = commands.count;
+    self.updateCompleted = 0;
+    self.currentUpdateCommand = commands.firstObject;
+    self.lastUpdateSummary = nil;
+    [self rebuildMenu];
+
+    NSString *logPath = self.updateLogURL.path;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
+        NSFileHandle *log = [NSFileHandle fileHandleForWritingAtPath:logPath];
+        NSUInteger failed = 0;
+        for (NSString *command in commands) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self.currentUpdateCommand = command;
+                [self rebuildMenu];
+            });
+            [log writeData:[[NSString stringWithFormat:@"==> %@\n", command] dataUsingEncoding:NSUTF8StringEncoding]];
+            int status = RunLoggedCommand(command, log);
+            if (status != 0) {
+                failed++;
+                [log writeData:[[NSString stringWithFormat:@"==> FAILED (exit %d): %@\n", status, command] dataUsingEncoding:NSUTF8StringEncoding]];
+            }
+            [log writeData:[@"\n" dataUsingEncoding:NSUTF8StringEncoding]];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self.updateCompleted += 1;
+                [self rebuildMenu];
+            });
+        }
+        [log closeFile];
+
+        NSUInteger succeeded = commands.count - failed;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.updating = NO;
+            self.currentUpdateCommand = nil;
+            self.lastUpdateSummary = failed == 0
+                ? [NSString stringWithFormat:@"Last run: all %lu updates succeeded", succeeded]
+                : [NSString stringWithFormat:@"Last run: %lu succeeded, %lu failed — see updates.log", succeeded, failed];
+            [self refresh:nil];
+        });
+    });
 }
 
 - (NSString *)displayNameForItem:(NSDictionary *)item {
@@ -1360,7 +1420,12 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         bottomDepth.layer.cornerRadius = 17;
         [content addSubview:bottomDepth];
 
-        NSString *state = self.refreshing ? @"Refreshing inventory…" : @"Local CLI inventory";
+        NSString *state = @"Local CLI inventory";
+        if (self.updating) {
+            state = [NSString stringWithFormat:@"Updating %lu of %lu…", MIN(self.updateCompleted + 1, self.updateTotal), self.updateTotal];
+        } else if (self.refreshing) {
+            state = @"Refreshing inventory…";
+        }
         NSColor *primaryText = [NSColor colorWithCalibratedWhite:0.96 alpha:1.0];
         NSColor *secondaryText = [NSColor colorWithCalibratedWhite:0.76 alpha:1.0];
         [content addSubview:GlassLabel(@"CLI", NSMakeRect(18, 49, 185, 22), [NSFont boldSystemFontOfSize:17], primaryText, NSTextAlignmentLeft)];
@@ -1392,7 +1457,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 
 - (NSMenuItem *)notableUpdateMenuItemForItem:(NSDictionary *)item {
     NSMenuItem *row = [[NSMenuItem alloc] initWithTitle:[self friendlyUpdateTitle:item] action:@selector(applyUpdate:) keyEquivalent:@""];
-    row.target = self;
+    row.target = self.updating ? nil : self;
     row.representedObject = item;
     row.toolTip = item[@"path"];
     row.image = [NSImage imageWithSystemSymbolName:@"arrow.triangle.2.circlepath" accessibilityDescription:@"Update available"];
@@ -1442,6 +1507,13 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     markdown.target = self;
     markdown.image = [NSImage imageWithSystemSymbolName:@"doc.plaintext" accessibilityDescription:@"Markdown Report"];
     [menu addItem:markdown];
+
+    if ([[NSFileManager defaultManager] fileExistsAtPath:self.updateLogURL.path]) {
+        NSMenuItem *updateLog = [[NSMenuItem alloc] initWithTitle:@"Update Log" action:@selector(openUpdateLog:) keyEquivalent:@""];
+        updateLog.target = self;
+        updateLog.image = [NSImage imageWithSystemSymbolName:@"text.alignleft" accessibilityDescription:@"Update Log"];
+        [menu addItem:updateLog];
+    }
 
     [menu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *note = [[NSMenuItem alloc] initWithTitle:@"Markdown is generated from the latest scan" action:nil keyEquivalent:@""];
@@ -1499,9 +1571,21 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
             ? [NSString stringWithFormat:@"Update All %lu…", totalUpdates]
             : @"Update All…";
         NSMenuItem *updateAll = [[NSMenuItem alloc] initWithTitle:updateAllTitle action:@selector(updateAll:) keyEquivalent:@"u"];
-        updateAll.target = totalUpdates > 0 ? self : nil;
+        updateAll.target = (totalUpdates > 0 && !self.updating) ? self : nil;
         updateAll.image = [NSImage imageWithSystemSymbolName:@"arrow.down.circle.fill" accessibilityDescription:@"Update All"];
         [updatesMenu addItem:updateAll];
+
+        if (self.updating) {
+            NSUInteger position = MIN(self.updateCompleted + 1, self.updateTotal);
+            NSString *progressText = [NSString stringWithFormat:@"Updating %lu of %lu — %@", position, self.updateTotal, self.currentUpdateCommand ?: @""];
+            NSMenuItem *progress = [[NSMenuItem alloc] initWithTitle:progressText action:nil keyEquivalent:@""];
+            progress.enabled = NO;
+            [updatesMenu addItem:progress];
+        } else if (self.lastUpdateSummary.length > 0) {
+            NSMenuItem *lastRun = [[NSMenuItem alloc] initWithTitle:self.lastUpdateSummary action:nil keyEquivalent:@""];
+            lastRun.enabled = NO;
+            [updatesMenu addItem:lastRun];
+        }
 
         if (notableUpdates.count > 0) {
             [updatesMenu addItem:[NSMenuItem separatorItem]];
@@ -1582,17 +1666,6 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
             [self reloadAllUpdatesDialog];
         });
     });
-}
-
-- (void)checkForUpdateRefreshRequest:(id)sender {
-    NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:self.updateRefreshRequestURL.path error:nil];
-    NSDate *modified = attributes[NSFileModificationDate];
-    if (!modified) return;
-    if (self.lastHandledUpdateRefreshDate && [modified compare:self.lastHandledUpdateRefreshDate] != NSOrderedDescending) return;
-    if (self.refreshing) return;
-
-    self.lastHandledUpdateRefreshDate = modified;
-    [self refresh:nil];
 }
 
 - (void)selectTerminal:(NSMenuItem *)sender {
@@ -1730,7 +1803,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = [NSString stringWithFormat:@"All Updates Available (%lu)", updates.count];
-    alert.informativeText = [NSString stringWithFormat:@"Double-click an update to run it in %@.", self.preferredTerminal ?: DefaultTerminalName()];
+    alert.informativeText = @"Double-click an update to run it quietly in the background.";
     alert.accessoryView = scrollView;
     self.allUpdatesAlert = alert;
     [alert addButtonWithTitle:@"Done"];
@@ -1769,6 +1842,10 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 - (void)openMarkdownReport:(id)sender {
     [self saveMarkdownReport];
     [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[self.markdownReportURL]];
+}
+
+- (void)openUpdateLog:(id)sender {
+    [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[self.updateLogURL]];
 }
 
 - (void)quit:(id)sender {
