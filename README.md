@@ -26,7 +26,7 @@ open "$HOME/Applications/CLITicker.app"
 - Icon-only menu bar app.
 - `Agent Tools` submenu for tools like Codex, Notion, Antigravity, Claude, Amp, Cora, Cursor, Goose, OpenCode, CodeRabbit, Kisuke, Droid, and related CLIs.
 - `Search CLIs` opens a native search panel for installed tools.
-- `Updates Available` submenu with readable version changes and clickable update actions.
+- `Updates Available` submenu with readable version changes, clickable update actions, and an `Update All` action that runs every supported update in one terminal session. Updated tools are removed from the list automatically after the rescan that follows.
 - `Recently Updated` submenu that fills in automatically when a CLI is installed or updated on the machine.
 - Clickable agent tools that open the selected CLI in the user's preferred terminal.
 - `Open Report` submenu for JSON or Markdown inventory reports.

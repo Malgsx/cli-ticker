@@ -229,6 +229,10 @@ static NSString *EscapedAppleScriptString(NSString *string) {
     return escaped;
 }
 
+static NSString *ShellSingleQuoteEscaped(NSString *string) {
+    return [string stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
+}
+
 static NSTextField *GlassLabel(NSString *text, NSRect frame, NSFont *font, NSColor *color, NSTextAlignment alignment) {
     NSTextField *label = [NSTextField labelWithString:text ?: @""];
     label.frame = frame;
@@ -1049,11 +1053,63 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     NSString *title = [NSString stringWithFormat:@"CLI - Update %@", item[@"name"] ?: @"CLI"];
     NSString *markerPath = self.updateRefreshRequestURL.path ?: @"";
     NSString *markerDir = markerPath.stringByDeletingLastPathComponent;
-    NSString *escapedCommand = [command stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
-    NSString *escapedTitle = [title stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
-    NSString *escapedMarkerDir = [markerDir stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
-    NSString *escapedMarkerPath = [markerPath stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
+    NSString *escapedCommand = ShellSingleQuoteEscaped(command);
+    NSString *escapedTitle = ShellSingleQuoteEscaped(title);
+    NSString *escapedMarkerDir = ShellSingleQuoteEscaped(markerDir);
+    NSString *escapedMarkerPath = ShellSingleQuoteEscaped(markerPath);
     return [NSString stringWithFormat:@"printf '\\033]0;%@\\007'; echo 'Running %@'; echo; %@; status=$?; if [ $status -eq 0 ]; then mkdir -p '%@'; touch '%@'; fi; echo; echo \"Update finished with exit code $status.\"; echo 'CLI will refresh Updates Available automatically after successful updates.'; echo 'Press Return to close this session.'; read _; exec ${SHELL:-/bin/zsh} -l", escapedTitle, escapedCommand, command, escapedMarkerDir, escapedMarkerPath];
+}
+
+// Unique update commands for every outdated tool that supports in-app updates.
+- (NSArray<NSString *> *)allUpdateCommands {
+    NSMutableArray<NSString *> *commands = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (NSDictionary *item in [self notableUpdateItems:NSUIntegerMax]) {
+        NSString *command = [self updateCommandForItem:item];
+        if (command.length == 0 || [seen containsObject:command]) continue;
+        [seen addObject:command];
+        [commands addObject:command];
+    }
+    return commands;
+}
+
+- (NSString *)updateAllTerminalCommandWithCommands:(NSArray<NSString *> *)commands {
+    NSString *markerPath = self.updateRefreshRequestURL.path ?: @"";
+    NSString *markerDir = markerPath.stringByDeletingLastPathComponent;
+
+    NSMutableString *script = [NSMutableString string];
+    [script appendFormat:@"printf '\\033]0;CLI - Update All\\007'; echo 'Running %lu updates'; echo; failed=0; ", commands.count];
+    for (NSString *command in commands) {
+        [script appendFormat:@"echo '==> %@'; %@ || failed=$((failed+1)); echo; ", ShellSingleQuoteEscaped(command), command];
+    }
+    // Touch the marker even on partial failure so the app rescans and removes
+    // whichever tools did update from the Updates Available list.
+    [script appendFormat:@"mkdir -p '%@'; touch '%@'; ", ShellSingleQuoteEscaped(markerDir), ShellSingleQuoteEscaped(markerPath)];
+    [script appendFormat:@"if [ $failed -eq 0 ]; then echo 'All %lu updates finished successfully.'; else echo \"$failed of %lu updates failed.\"; fi; ", commands.count, commands.count];
+    [script appendString:@"echo 'CLI will remove updated tools from Updates Available automatically.'; echo 'Press Return to close this session.'; read _; exec ${SHELL:-/bin/zsh} -l"];
+    return script;
+}
+
+- (void)updateAll:(id)sender {
+    NSArray<NSString *> *commands = [self allUpdateCommands];
+    if (commands.count == 0) {
+        NSAlert *unsupported = [[NSAlert alloc] init];
+        unsupported.messageText = @"No Updatable CLIs";
+        unsupported.informativeText = @"None of the outdated tools support in-app updates. Use the package manager directly for these sources.";
+        [unsupported addButtonWithTitle:@"OK"];
+        [unsupported runModal];
+        return;
+    }
+
+    NSAlert *confirmAlert = [[NSAlert alloc] init];
+    confirmAlert.messageText = [NSString stringWithFormat:@"Update all %lu CLIs?", commands.count];
+    confirmAlert.informativeText = [NSString stringWithFormat:@"CLI will open %@ and run:\n\n%@", self.preferredTerminal ?: DefaultTerminalName(), [commands componentsJoinedByString:@"\n"]];
+    [confirmAlert addButtonWithTitle:@"Update All"];
+    [confirmAlert addButtonWithTitle:@"Cancel"];
+    if ([confirmAlert runModal] != NSAlertFirstButtonReturn) return;
+
+    NSString *terminalCommand = [self updateAllTerminalCommandWithCommands:commands];
+    [self runShellCommand:terminalCommand inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
 }
 
 - (NSString *)displayNameForItem:(NSDictionary *)item {
@@ -1181,8 +1237,8 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 }
 
 - (NSString *)launchCommandWithLabel:(NSString *)label executable:(NSString *)command {
-    NSString *escapedCommand = [command stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
-    NSString *escapedLabel = [label stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
+    NSString *escapedCommand = ShellSingleQuoteEscaped(command);
+    NSString *escapedLabel = ShellSingleQuoteEscaped(label);
     return [NSString stringWithFormat:@"printf '\\033]0;CLI - %@\\007'; echo 'Launching %@'; echo; '%@'; echo; echo 'Session finished. Close this window or continue using the shell.'; exec ${SHELL:-/bin/zsh} -l", escapedLabel, escapedLabel, escapedCommand];
 }
 
@@ -1436,6 +1492,10 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
             [updatesMenu addItem:[self notableUpdateMenuItemForItem:item]];
         }
         [updatesMenu addItem:[NSMenuItem separatorItem]];
+        NSMenuItem *updateAll = [[NSMenuItem alloc] initWithTitle:@"Update All…" action:@selector(updateAll:) keyEquivalent:@"u"];
+        updateAll.target = self;
+        updateAll.image = [NSImage imageWithSystemSymbolName:@"arrow.down.circle.fill" accessibilityDescription:@"Update All"];
+        [updatesMenu addItem:updateAll];
         NSMenuItem *showAll = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Show All %lu Updates…", totalUpdates] action:@selector(showAllUpdates:) keyEquivalent:@""];
         showAll.target = self;
         showAll.image = [NSImage imageWithSystemSymbolName:@"list.bullet.rectangle" accessibilityDescription:@"Show All Updates"];
@@ -1660,13 +1720,18 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     alert.accessoryView = scrollView;
     self.allUpdatesAlert = alert;
     [alert addButtonWithTitle:@"Done"];
+    [alert addButtonWithTitle:@"Update All…"];
     [alert addButtonWithTitle:@"Open Markdown Report"];
-    if ([alert runModal] == NSAlertSecondButtonReturn) {
-        [self openMarkdownReport:nil];
-    }
+    NSModalResponse response = [alert runModal];
     self.allUpdatesAlert = nil;
     self.allUpdatesTableView = nil;
     self.allUpdateItems = nil;
+
+    if (response == NSAlertSecondButtonReturn) {
+        [self updateAll:nil];
+    } else if (response == NSAlertThirdButtonReturn) {
+        [self openMarkdownReport:nil];
+    }
 }
 
 - (void)updateSelectedFromAllUpdates:(NSTableView *)sender {
