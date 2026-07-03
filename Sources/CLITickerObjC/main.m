@@ -1488,14 +1488,15 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         updatesSummary.enabled = NO;
         [updatesMenu addItem:updatesSummary];
         [updatesMenu addItem:[NSMenuItem separatorItem]];
+        NSMenuItem *updateAll = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Update All %lu…", totalUpdates] action:@selector(updateAll:) keyEquivalent:@"u"];
+        updateAll.target = self;
+        updateAll.image = [NSImage imageWithSystemSymbolName:@"arrow.down.circle.fill" accessibilityDescription:@"Update All"];
+        [updatesMenu addItem:updateAll];
+        [updatesMenu addItem:[NSMenuItem separatorItem]];
         for (NSDictionary *item in notableUpdates) {
             [updatesMenu addItem:[self notableUpdateMenuItemForItem:item]];
         }
         [updatesMenu addItem:[NSMenuItem separatorItem]];
-        NSMenuItem *updateAll = [[NSMenuItem alloc] initWithTitle:@"Update All…" action:@selector(updateAll:) keyEquivalent:@"u"];
-        updateAll.target = self;
-        updateAll.image = [NSImage imageWithSystemSymbolName:@"arrow.down.circle.fill" accessibilityDescription:@"Update All"];
-        [updatesMenu addItem:updateAll];
         NSMenuItem *showAll = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Show All %lu Updates…", totalUpdates] action:@selector(showAllUpdates:) keyEquivalent:@""];
         showAll.target = self;
         showAll.image = [NSImage imageWithSystemSymbolName:@"list.bullet.rectangle" accessibilityDescription:@"Show All Updates"];
