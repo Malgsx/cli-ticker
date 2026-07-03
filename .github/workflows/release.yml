@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install icon dependency
-        run: python3 -m pip install pillow
+        run: python3 -m pip install --break-system-packages pillow
       - name: Build distributable
         run: make dist
       - name: Publish GitHub release
