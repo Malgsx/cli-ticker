@@ -76,7 +76,7 @@ This builds the app (requires only the Xcode Command Line Tools: `xcode-select -
 
 The first refresh can take a while because Homebrew and npm update checks shell out to local package managers.
 
-Note: the `Updates Available` submenu (and its `Update All` action) only appears when at least one scanned tool is outdated. If everything is current, the section is hidden until the next update is detected.
+The `Updates Available` submenu is always visible. `Update All` sits at the top of it and is enabled whenever at least one scanned tool is outdated; when everything is current the section shows "All scanned CLIs are up to date" and `Update All` is greyed out until the next update is detected.
 
 ## Build The App
 

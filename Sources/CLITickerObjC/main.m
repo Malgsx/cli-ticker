@@ -1478,35 +1478,48 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         [menu addItem:[NSMenuItem separatorItem]];
     }
 
+    // The Updates Available section is always visible so Update All is always
+    // discoverable; rows and actions adapt to whether anything is outdated.
     NSArray *notableUpdates = [self notableUpdateItems:14];
-    if (notableUpdates.count > 0) {
-        NSUInteger totalUpdates = [self countWithStatus:StatusOutdated];
-        NSMenuItem *updatesFolder = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Updates Available  %lu", totalUpdates] action:nil keyEquivalent:@""];
+    NSUInteger totalUpdates = [self countWithStatus:StatusOutdated];
+    {
+        NSString *folderTitle = totalUpdates > 0
+            ? [NSString stringWithFormat:@"Updates Available  %lu", totalUpdates]
+            : @"Updates Available";
+        NSMenuItem *updatesFolder = [[NSMenuItem alloc] initWithTitle:folderTitle action:nil keyEquivalent:@""];
         updatesFolder.image = [NSImage imageWithSystemSymbolName:@"arrow.down.circle" accessibilityDescription:@"Notable Updates"];
         NSMenu *updatesMenu = [[NSMenu alloc] initWithTitle:@"Notable Updates"];
-        NSMenuItem *updatesSummary = [[NSMenuItem alloc] initWithTitle:@"Newest versions found" action:nil keyEquivalent:@""];
+        NSString *summaryText = totalUpdates > 0 ? @"Newest versions found" : @"All scanned CLIs are up to date";
+        NSMenuItem *updatesSummary = [[NSMenuItem alloc] initWithTitle:summaryText action:nil keyEquivalent:@""];
         updatesSummary.enabled = NO;
         [updatesMenu addItem:updatesSummary];
         [updatesMenu addItem:[NSMenuItem separatorItem]];
-        NSMenuItem *updateAll = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Update All %lu…", totalUpdates] action:@selector(updateAll:) keyEquivalent:@"u"];
-        updateAll.target = self;
+
+        NSString *updateAllTitle = totalUpdates > 0
+            ? [NSString stringWithFormat:@"Update All %lu…", totalUpdates]
+            : @"Update All…";
+        NSMenuItem *updateAll = [[NSMenuItem alloc] initWithTitle:updateAllTitle action:@selector(updateAll:) keyEquivalent:@"u"];
+        updateAll.target = totalUpdates > 0 ? self : nil;
         updateAll.image = [NSImage imageWithSystemSymbolName:@"arrow.down.circle.fill" accessibilityDescription:@"Update All"];
         [updatesMenu addItem:updateAll];
-        [updatesMenu addItem:[NSMenuItem separatorItem]];
-        for (NSDictionary *item in notableUpdates) {
-            [updatesMenu addItem:[self notableUpdateMenuItemForItem:item]];
+
+        if (notableUpdates.count > 0) {
+            [updatesMenu addItem:[NSMenuItem separatorItem]];
+            for (NSDictionary *item in notableUpdates) {
+                [updatesMenu addItem:[self notableUpdateMenuItemForItem:item]];
+            }
+            [updatesMenu addItem:[NSMenuItem separatorItem]];
+            NSMenuItem *showAll = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Show All %lu Updates…", totalUpdates] action:@selector(showAllUpdates:) keyEquivalent:@""];
+            showAll.target = self;
+            showAll.image = [NSImage imageWithSystemSymbolName:@"list.bullet.rectangle" accessibilityDescription:@"Show All Updates"];
+            [updatesMenu addItem:showAll];
+            NSString *noteText = totalUpdates > notableUpdates.count
+                ? [NSString stringWithFormat:@"Showing %lu of %lu updates", notableUpdates.count, totalUpdates]
+                : @"Click an update to apply it";
+            NSMenuItem *updatesNote = [[NSMenuItem alloc] initWithTitle:noteText action:nil keyEquivalent:@""];
+            updatesNote.enabled = NO;
+            [updatesMenu addItem:updatesNote];
         }
-        [updatesMenu addItem:[NSMenuItem separatorItem]];
-        NSMenuItem *showAll = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Show All %lu Updates…", totalUpdates] action:@selector(showAllUpdates:) keyEquivalent:@""];
-        showAll.target = self;
-        showAll.image = [NSImage imageWithSystemSymbolName:@"list.bullet.rectangle" accessibilityDescription:@"Show All Updates"];
-        [updatesMenu addItem:showAll];
-        NSString *noteText = totalUpdates > notableUpdates.count
-            ? [NSString stringWithFormat:@"Showing %lu of %lu updates", notableUpdates.count, totalUpdates]
-            : @"Click an update to apply it";
-        NSMenuItem *updatesNote = [[NSMenuItem alloc] initWithTitle:noteText action:nil keyEquivalent:@""];
-        updatesNote.enabled = NO;
-        [updatesMenu addItem:updatesNote];
         updatesFolder.submenu = updatesMenu;
         [menu addItem:updatesFolder];
         [menu addItem:[NSMenuItem separatorItem]];
