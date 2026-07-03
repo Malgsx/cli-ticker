@@ -37,6 +37,10 @@ mkdir -p "$INSTALL_DIR"
 rm -rf "$INSTALL_DIR/$APP_NAME"
 ditto "$tmpdir/$APP_NAME" "$INSTALL_DIR/$APP_NAME"
 
+# The app is not notarized yet; clear any quarantine flag so Gatekeeper
+# does not block it on machines where the download was quarantined.
+xattr -dr com.apple.quarantine "$INSTALL_DIR/$APP_NAME" 2>/dev/null || true
+
 echo "Installed $APP_NAME to $INSTALL_DIR"
 echo "Open it with:"
 echo "  open \"$INSTALL_DIR/$APP_NAME\""

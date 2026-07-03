@@ -26,7 +26,8 @@ open "$HOME/Applications/CLITicker.app"
 - Icon-only menu bar app.
 - `Agent Tools` submenu for tools like Codex, Notion, Antigravity, Claude, Amp, Cora, Cursor, Goose, OpenCode, CodeRabbit, Kisuke, Droid, and related CLIs.
 - `Search CLIs` opens a native search panel for installed tools.
-- `Updates Available` submenu with readable version changes and clickable update actions.
+- `Updates Available` submenu with readable version changes, clickable update actions, and an `Update All` action that runs every supported update in one terminal session. Updated tools are removed from the list automatically after the rescan that follows.
+- `Recently Updated` submenu that fills in automatically when a CLI is installed or updated on the machine.
 - Clickable agent tools that open the selected CLI in the user's preferred terminal.
 - `Open Report` submenu for JSON or Markdown inventory reports.
 - `Preferred Terminal` submenu with Terminal, Ghostty, iTerm, or Warp when installed.
@@ -46,6 +47,16 @@ Reports are written locally:
 
 - `~/Library/Application Support/CLITicker/inventory.json`
 - `~/Library/Application Support/CLITicker/inventory.md`
+- `~/Library/Application Support/CLITicker/changes.json` (recent install/update events)
+
+## Automatic Change Detection
+
+CLI watches common install locations (Homebrew `bin`/`Cellar`/`Caskroom`, `~/.local/bin`, `~/.bun/bin`, `~/.npm-global/bin`, and similar) with FSEvents. When a CLI is downloaded or updated on the machine — whether through the app, a package manager, or a `curl | bash` installer — the watcher triggers a debounced rescan a few seconds later. The rescan:
+
+- moves the tool out of `Updates Available` once it is current, and
+- records the change in the `Recently Updated` bucket, showing the version transition (for example `0.1.0 → 0.2.0`) and how long ago it happened.
+
+Recently Updated entries expire after 24 hours and are also written to the Markdown report. The 15-minute background scan and post-update marker refresh still run as a fallback.
 
 ## Privacy
 
