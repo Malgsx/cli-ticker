@@ -1,8 +1,16 @@
 #import <AppKit/AppKit.h>
+#import <CoreServices/CoreServices.h>
 
 static NSString *const StatusCurrent = @"current";
 static NSString *const StatusOutdated = @"outdated";
 static NSString *const StatusUnknown = @"unknown";
+
+static NSString *const ChangeKindInstalled = @"installed";
+static NSString *const ChangeKindUpdated = @"updated";
+
+// How long an install/update event stays visible in the Recently Updated bucket.
+static const NSTimeInterval RecentChangeLifetime = 24 * 60 * 60;
+static const NSUInteger RecentChangeCapacity = 20;
 
 static NSString *RunCommand(NSString *launchPath, NSArray<NSString *> *arguments) {
     NSTask *task = [[NSTask alloc] init];
@@ -47,6 +55,10 @@ static NSMutableDictionary *Item(NSString *name, NSString *current, NSString *la
     if (latest.length > 0) item[@"latestVersion"] = latest;
     if (path.length > 0) item[@"path"] = path;
     return item;
+}
+
+static NSString *InventoryKey(NSDictionary *item) {
+    return [NSString stringWithFormat:@"%@:%@", item[@"source"] ?: @"", item[@"name"] ?: @""];
 }
 
 static NSInteger StatusRank(NSString *status) {
@@ -247,11 +259,32 @@ static NSString *FindApplicationPath(NSArray<NSString *> *appNames) {
     return nil;
 }
 
+static NSArray<NSDictionary *> *TerminalCandidates(void) {
+    return @[
+        @{@"name": @"Ghostty", @"apps": @[@"Ghostty.app"]},
+        @{@"name": @"iTerm", @"apps": @[@"iTerm.app", @"iTerm2.app"]},
+        @{@"name": @"Warp", @"apps": @[@"Warp.app"]}
+    ];
+}
+
 static NSString *DefaultTerminalName(void) {
-    if (FindApplicationPath(@[@"Ghostty.app"])) return @"Ghostty";
-    if (FindApplicationPath(@[@"iTerm.app", @"iTerm2.app"])) return @"iTerm";
-    if (FindApplicationPath(@[@"Warp.app"])) return @"Warp";
+    for (NSDictionary *terminal in TerminalCandidates()) {
+        if (FindApplicationPath(terminal[@"apps"])) return terminal[@"name"];
+    }
     return @"Terminal";
+}
+
+// Maps a canonical agent name to the executable users actually invoke.
+static NSString *AgentInvocationName(NSString *canonicalName) {
+    static NSDictionary<NSString *, NSString *> *overrides;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        overrides = @{
+            @"antigravity": @"agy",
+            @"notion": @"ntn"
+        };
+    });
+    return overrides[canonicalName] ?: canonicalName;
 }
 
 @interface InventoryService : NSObject
@@ -440,15 +473,30 @@ static NSString *DefaultTerminalName(void) {
 @property BOOL refreshing;
 @property NSURL *reportURL;
 @property NSURL *markdownReportURL;
+@property NSURL *changesURL;
 @property NSURL *updateRefreshRequestURL;
 @property NSDate *lastHandledUpdateRefreshDate;
 @property NSString *preferredTerminal;
+@property NSArray<NSDictionary *> *recentChanges;
+@property (assign) FSEventStreamRef installWatchStream;
+@property NSTimer *watcherRefreshTimer;
 @property NSArray<NSDictionary *> *allUpdateItems;
 @property NSTableView *allUpdatesTableView;
 @property NSAlert *allUpdatesAlert;
 @property NSArray<NSDictionary *> *searchResultItems;
 @property NSTableView *searchResultsTableView;
+- (void)scheduleWatcherRefresh;
 @end
+
+static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
+                                 void *info,
+                                 size_t numEvents,
+                                 void *eventPaths,
+                                 const FSEventStreamEventFlags *eventFlags,
+                                 const FSEventStreamEventId *eventIds) {
+    MenuController *controller = (__bridge MenuController *)info;
+    [controller scheduleWatcherRefresh];
+}
 
 @implementation MenuController
 
@@ -477,16 +525,24 @@ static NSString *DefaultTerminalName(void) {
     [[NSFileManager defaultManager] createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:nil];
     self.reportURL = [dir URLByAppendingPathComponent:@"inventory.json"];
     self.markdownReportURL = [dir URLByAppendingPathComponent:@"inventory.md"];
+    self.changesURL = [dir URLByAppendingPathComponent:@"changes.json"];
     self.updateRefreshRequestURL = [dir URLByAppendingPathComponent:@"update-refresh-request"];
     NSDictionary *markerAttributes = [[NSFileManager defaultManager] attributesOfItemAtPath:self.updateRefreshRequestURL.path error:nil];
     self.lastHandledUpdateRefreshDate = markerAttributes[NSFileModificationDate];
+    self.recentChanges = @[];
     [self loadReport];
+    [self loadRecentChanges];
     [self rebuildMenu];
     [self refresh:nil];
+    [self startInstallWatcher];
 
     [NSTimer scheduledTimerWithTimeInterval:15 * 60 target:self selector:@selector(refresh:) userInfo:nil repeats:YES];
     [NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(checkForUpdateRefreshRequest:) userInfo:nil repeats:YES];
     return self;
+}
+
+- (void)dealloc {
+    [self stopInstallWatcher];
 }
 
 - (void)loadReport {
@@ -502,6 +558,201 @@ static NSString *DefaultTerminalName(void) {
     [self saveMarkdownReport];
 }
 
+#pragma mark - Recently Updated bucket
+
+- (void)loadRecentChanges {
+    NSData *data = [NSData dataWithContentsOfURL:self.changesURL];
+    if (!data) return;
+    NSArray *saved = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if ([saved isKindOfClass:[NSArray class]]) self.recentChanges = [self prunedChanges:saved];
+}
+
+- (void)saveRecentChanges {
+    NSData *data = [NSJSONSerialization dataWithJSONObject:self.recentChanges options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
+    [data writeToURL:self.changesURL atomically:YES];
+}
+
+- (NSArray<NSDictionary *> *)prunedChanges:(NSArray<NSDictionary *> *)changes {
+    NSTimeInterval cutoff = [[NSDate date] timeIntervalSince1970] - RecentChangeLifetime;
+    NSMutableArray *pruned = [NSMutableArray array];
+    for (NSDictionary *change in changes) {
+        if (![change isKindOfClass:[NSDictionary class]]) continue;
+        if ([change[@"date"] doubleValue] < cutoff) continue;
+        [pruned addObject:change];
+        if (pruned.count >= RecentChangeCapacity) break;
+    }
+    return pruned;
+}
+
+- (NSDictionary *)changeOfKind:(NSString *)kind forItem:(NSDictionary *)item previousVersion:(NSString *)previousVersion {
+    NSMutableDictionary *change = [NSMutableDictionary dictionary];
+    change[@"key"] = InventoryKey(item);
+    change[@"name"] = item[@"name"] ?: @"";
+    change[@"source"] = item[@"source"] ?: @"";
+    change[@"kind"] = kind;
+    change[@"date"] = @([[NSDate date] timeIntervalSince1970]);
+    if ([item[@"currentVersion"] isKindOfClass:[NSString class]]) change[@"currentVersion"] = item[@"currentVersion"];
+    if (previousVersion.length > 0) change[@"previousVersion"] = previousVersion;
+    return change;
+}
+
+// Diffs a fresh scan against the previous one so installs and version bumps
+// land in the Recently Updated bucket without any manual action.
+- (void)recordChangesFromItems:(NSArray<NSDictionary *> *)previousItems toItems:(NSArray<NSDictionary *> *)freshItems {
+    if (previousItems.count == 0) return;
+
+    NSMutableDictionary<NSString *, NSDictionary *> *previous = [NSMutableDictionary dictionary];
+    NSMutableSet<NSString *> *previousSources = [NSMutableSet set];
+    for (NSDictionary *item in previousItems) {
+        previous[InventoryKey(item)] = item;
+        [previousSources addObject:item[@"source"] ?: @""];
+    }
+
+    NSMutableArray<NSDictionary *> *newChanges = [NSMutableArray array];
+    for (NSDictionary *item in freshItems) {
+        NSDictionary *old = previous[InventoryKey(item)];
+        if (!old) {
+            // A source absent from the previous scan usually means that scanner
+            // failed last time, not that every one of its tools was just installed.
+            if (![previousSources containsObject:item[@"source"] ?: @""]) continue;
+            [newChanges addObject:[self changeOfKind:ChangeKindInstalled forItem:item previousVersion:nil]];
+            continue;
+        }
+        NSString *oldVersion = old[@"currentVersion"];
+        NSString *newVersion = item[@"currentVersion"];
+        if (oldVersion.length > 0 && newVersion.length > 0 && ![oldVersion isEqualToString:newVersion]) {
+            [newChanges addObject:[self changeOfKind:ChangeKindUpdated forItem:item previousVersion:oldVersion]];
+        }
+    }
+    if (newChanges.count == 0) {
+        NSArray *pruned = [self prunedChanges:self.recentChanges];
+        if (pruned.count != self.recentChanges.count) {
+            self.recentChanges = pruned;
+            [self saveRecentChanges];
+        }
+        return;
+    }
+
+    NSMutableSet *changedKeys = [NSMutableSet set];
+    for (NSDictionary *change in newChanges) [changedKeys addObject:change[@"key"]];
+
+    NSMutableArray *merged = [newChanges mutableCopy];
+    for (NSDictionary *change in self.recentChanges) {
+        if ([changedKeys containsObject:change[@"key"]]) continue;
+        [merged addObject:change];
+    }
+    self.recentChanges = [self prunedChanges:merged];
+    [self saveRecentChanges];
+}
+
+- (NSString *)relativeTimeForTimestamp:(NSTimeInterval)timestamp {
+    NSTimeInterval elapsed = [[NSDate date] timeIntervalSince1970] - timestamp;
+    if (elapsed < 60) return @"just now";
+    if (elapsed < 60 * 60) return [NSString stringWithFormat:@"%.0fm ago", elapsed / 60];
+    if (elapsed < 24 * 60 * 60) return [NSString stringWithFormat:@"%.0fh ago", elapsed / (60 * 60)];
+    return [NSString stringWithFormat:@"%.0fd ago", elapsed / (24 * 60 * 60)];
+}
+
+- (NSString *)recentChangeTitle:(NSDictionary *)change {
+    NSDictionary *itemStub = @{@"name": change[@"name"] ?: @""};
+    NSString *label = [self titleNameForItem:itemStub];
+    NSString *when = [self relativeTimeForTimestamp:[change[@"date"] doubleValue]];
+
+    NSString *previousVersion = change[@"previousVersion"];
+    NSString *currentVersion = change[@"currentVersion"];
+    if ([change[@"kind"] isEqualToString:ChangeKindUpdated] && previousVersion.length > 0 && currentVersion.length > 0) {
+        return [NSString stringWithFormat:@"%@  %@ → %@  · updated %@", label, previousVersion, currentVersion, when];
+    }
+    NSString *version = currentVersion.length > 0 ? currentVersion : @"installed";
+    return [NSString stringWithFormat:@"%@  %@  · installed %@", label, version, when];
+}
+
+- (NSDictionary *)inventoryItemForChange:(NSDictionary *)change {
+    NSString *key = change[@"key"];
+    for (NSDictionary *item in self.items) {
+        if ([InventoryKey(item) isEqualToString:key]) return item;
+    }
+    return nil;
+}
+
+#pragma mark - Install watcher
+
+- (NSArray<NSString *> *)installWatchPaths {
+    NSString *home = NSHomeDirectory();
+    NSArray<NSString *> *candidates = @[
+        @"/opt/homebrew/bin",
+        @"/opt/homebrew/Cellar",
+        @"/opt/homebrew/Caskroom",
+        @"/usr/local/bin",
+        @"/usr/local/Cellar",
+        @"/usr/local/Caskroom",
+        [home stringByAppendingPathComponent:@".local/bin"],
+        [home stringByAppendingPathComponent:@".bun/bin"],
+        [home stringByAppendingPathComponent:@".npm-global/bin"],
+        [home stringByAppendingPathComponent:@".claude/local/bin"]
+    ];
+
+    NSMutableArray *paths = [NSMutableArray array];
+    for (NSString *candidate in candidates) {
+        BOOL isDirectory = NO;
+        if ([[NSFileManager defaultManager] fileExistsAtPath:candidate isDirectory:&isDirectory] && isDirectory) {
+            [paths addObject:candidate];
+        }
+    }
+    return paths;
+}
+
+- (void)startInstallWatcher {
+    NSArray<NSString *> *paths = [self installWatchPaths];
+    if (paths.count == 0) return;
+
+    FSEventStreamContext context = {0, (__bridge void *)self, NULL, NULL, NULL};
+    FSEventStreamRef stream = FSEventStreamCreate(kCFAllocatorDefault,
+                                                  InstallWatchCallback,
+                                                  &context,
+                                                  (__bridge CFArrayRef)paths,
+                                                  kFSEventStreamEventIdSinceNow,
+                                                  2.0,
+                                                  kFSEventStreamCreateFlagNone);
+    if (!stream) return;
+
+    FSEventStreamSetDispatchQueue(stream, dispatch_get_main_queue());
+    if (!FSEventStreamStart(stream)) {
+        FSEventStreamInvalidate(stream);
+        FSEventStreamRelease(stream);
+        return;
+    }
+    self.installWatchStream = stream;
+}
+
+- (void)stopInstallWatcher {
+    if (!self.installWatchStream) return;
+    FSEventStreamStop(self.installWatchStream);
+    FSEventStreamInvalidate(self.installWatchStream);
+    FSEventStreamRelease(self.installWatchStream);
+    self.installWatchStream = NULL;
+}
+
+// Debounced so a burst of file events from one install triggers a single rescan
+// after the package manager has finished writing.
+- (void)scheduleWatcherRefresh {
+    [self.watcherRefreshTimer invalidate];
+    self.watcherRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:8
+                                                                target:self
+                                                              selector:@selector(watcherRefreshFired:)
+                                                              userInfo:nil
+                                                               repeats:NO];
+}
+
+- (void)watcherRefreshFired:(NSTimer *)timer {
+    self.watcherRefreshTimer = nil;
+    if (self.refreshing) {
+        [self scheduleWatcherRefresh];
+        return;
+    }
+    [self refresh:nil];
+}
+
 - (NSString *)markdownEscaped:(NSString *)value {
     NSString *text = value ?: @"";
     text = [text stringByReplacingOccurrencesOfString:@"|" withString:@"\\|"];
@@ -510,12 +761,8 @@ static NSString *DefaultTerminalName(void) {
 }
 
 - (void)saveMarkdownReport {
-    NSUInteger outdated = 0;
-    NSUInteger unknown = 0;
-    for (NSDictionary *item in self.items) {
-        if ([item[@"status"] isEqualToString:StatusOutdated]) outdated++;
-        if ([item[@"status"] isEqualToString:StatusUnknown]) unknown++;
-    }
+    NSUInteger outdated = [self countWithStatus:StatusOutdated];
+    NSUInteger unknown = [self countWithStatus:StatusUnknown];
 
     NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
     formatter.dateStyle = NSDateFormatterMediumStyle;
@@ -562,6 +809,23 @@ static NSString *DefaultTerminalName(void) {
         [markdown appendString:@"\n"];
     }
 
+    NSArray *recentChanges = [self prunedChanges:self.recentChanges];
+    if (recentChanges.count > 0) {
+        [markdown appendString:@"## Recently Updated\n\n"];
+        [markdown appendString:@"| CLI | Change | Previous | Current | Source |\n"];
+        [markdown appendString:@"| --- | --- | --- | --- | --- |\n"];
+        for (NSDictionary *change in recentChanges) {
+            [markdown appendFormat:@"| %@ | %@ | %@ | %@ | %@ |\n",
+                [self markdownEscaped:change[@"name"] ?: @""],
+                [self markdownEscaped:change[@"kind"] ?: @""],
+                [self markdownEscaped:change[@"previousVersion"] ?: @""],
+                [self markdownEscaped:change[@"currentVersion"] ?: @""],
+                [self markdownEscaped:change[@"source"] ?: @""]
+            ];
+        }
+        [markdown appendString:@"\n"];
+    }
+
     [markdown appendString:@"## Full Inventory\n\n"];
     [markdown appendString:@"| CLI | Status | Current | Latest | Source | Path |\n"];
     [markdown appendString:@"| --- | --- | --- | --- | --- | --- |\n"];
@@ -579,28 +843,18 @@ static NSString *DefaultTerminalName(void) {
     [markdown writeToURL:self.markdownReportURL atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
+- (NSUInteger)countWithStatus:(NSString *)status {
+    NSUInteger count = 0;
+    for (NSDictionary *item in self.items) {
+        if ([item[@"status"] isEqualToString:status]) count++;
+    }
+    return count;
+}
+
 - (NSString *)summaryTitle {
     if (self.items.count == 0) return @"No scan yet";
-    NSUInteger outdated = 0;
-    NSUInteger unknown = 0;
-    for (NSDictionary *item in self.items) {
-        if ([item[@"status"] isEqualToString:StatusOutdated]) outdated++;
-        if ([item[@"status"] isEqualToString:StatusUnknown]) unknown++;
-    }
-    return [NSString stringWithFormat:@"%lu CLIs scanned, %lu outdated, %lu unknown", self.items.count, outdated, unknown];
-}
-
-- (NSString *)badgeTitle {
-    return @"";
-}
-
-- (NSString *)rowTitle:(NSDictionary *)item {
-    NSString *marker = @"?";
-    if ([item[@"status"] isEqualToString:StatusOutdated]) marker = @"!";
-    if ([item[@"status"] isEqualToString:StatusCurrent]) marker = @"OK";
-    NSString *current = item[@"currentVersion"] ? [NSString stringWithFormat:@" %@", item[@"currentVersion"]] : @"";
-    NSString *latest = item[@"latestVersion"] ? [NSString stringWithFormat:@" -> %@", item[@"latestVersion"]] : @"";
-    return [NSString stringWithFormat:@"%@ %@%@%@ [%@]", marker, item[@"name"], current, latest, item[@"source"]];
+    return [NSString stringWithFormat:@"%lu CLIs scanned, %lu outdated, %lu unknown",
+        self.items.count, [self countWithStatus:StatusOutdated], [self countWithStatus:StatusUnknown]];
 }
 
 - (NSString *)friendlyUpdateTitle:(NSDictionary *)item {
@@ -819,7 +1073,6 @@ static NSString *DefaultTerminalName(void) {
     if ([item[@"status"] isEqualToString:StatusOutdated] && latest.length > 0) {
         return [NSString stringWithFormat:@"%@ → %@", current, latest];
     }
-    if ([item[@"status"] isEqualToString:StatusCurrent]) return current;
     return current;
 }
 
@@ -888,16 +1141,8 @@ static NSString *DefaultTerminalName(void) {
 }
 
 - (NSString *)agentRowTitle:(NSDictionary *)item {
-    NSString *canonicalName = [self displayNameForItem:item];
-    NSString *label = [self friendlyAgentName:canonicalName];
-
-    if ([item[@"status"] isEqualToString:StatusOutdated] && item[@"latestVersion"]) {
-        return [NSString stringWithFormat:@"%@  %@", label, [self versionSummaryForItem:item]];
-    }
-    if ([item[@"status"] isEqualToString:StatusCurrent]) {
-        return [NSString stringWithFormat:@"%@  %@", label, [self versionSummaryForItem:item]];
-    }
-    return [NSString stringWithFormat:@"%@  installed", label];
+    NSString *label = [self friendlyAgentName:[self displayNameForItem:item]];
+    return [NSString stringWithFormat:@"%@  %@", label, [self versionSummaryForItem:item]];
 }
 
 - (NSMenuItem *)agentMenuItemForItem:(NSDictionary *)item {
@@ -915,14 +1160,7 @@ static NSString *DefaultTerminalName(void) {
     NSString *path = item[@"path"];
     if (path.length > 0 && [[NSFileManager defaultManager] isExecutableFileAtPath:path]) return path;
 
-    NSDictionary *commands = @{
-        @"coderabbit": @"coderabbit",
-        @"cursor-agent": @"cursor-agent",
-        @"antigravity": @"agy",
-        @"notion": @"ntn",
-        @"opencode": @"opencode"
-    };
-    NSString *command = commands[canonicalName] ?: canonicalName;
+    NSString *command = AgentInvocationName(canonicalName);
     NSString *resolved = CommandPath(command);
     if (resolved.length > 0) return resolved;
 
@@ -942,30 +1180,20 @@ static NSString *DefaultTerminalName(void) {
     return command;
 }
 
-- (NSString *)launchCommandForAgentItem:(NSDictionary *)item {
-    NSString *command = [self commandForAgentItem:item];
-    NSString *label = [self friendlyAgentName:[self displayNameForItem:item]];
+- (NSString *)launchCommandWithLabel:(NSString *)label executable:(NSString *)command {
     NSString *escapedCommand = [command stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
-    return [NSString stringWithFormat:@"printf '\\033]0;CLI - %@\\007'; echo 'Launching %@'; echo; '%@'; echo; echo 'Session finished. Close this window or continue using the shell.'; exec ${SHELL:-/bin/zsh} -l", label, label, escapedCommand];
+    NSString *escapedLabel = [label stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
+    return [NSString stringWithFormat:@"printf '\\033]0;CLI - %@\\007'; echo 'Launching %@'; echo; '%@'; echo; echo 'Session finished. Close this window or continue using the shell.'; exec ${SHELL:-/bin/zsh} -l", escapedLabel, escapedLabel, escapedCommand];
 }
 
-- (NSString *)commandForCLIItem:(NSDictionary *)item {
-    NSString *path = item[@"path"];
-    if (path.length > 0 && [[NSFileManager defaultManager] isExecutableFileAtPath:path]) return path;
-
-    NSString *invocation = [self invocationForCLIItem:item];
-    NSString *resolved = invocation.length > 0 ? CommandPath(invocation) : nil;
-    return resolved.length > 0 ? resolved : invocation;
+- (NSString *)launchCommandForAgentItem:(NSDictionary *)item {
+    NSString *label = [self friendlyAgentName:[self displayNameForItem:item]];
+    return [self launchCommandWithLabel:label executable:[self commandForAgentItem:item]];
 }
 
 - (NSString *)invocationForCLIItem:(NSDictionary *)item {
     NSString *displayName = [self displayNameForItem:item];
-    if ([displayName isEqualToString:@"coderabbit"]) return @"coderabbit";
-    if ([displayName isEqualToString:@"cursor-agent"]) return @"cursor-agent";
-    if ([displayName isEqualToString:@"antigravity"]) return @"agy";
-    if ([displayName isEqualToString:@"notion"]) return @"ntn";
-    if ([displayName isEqualToString:@"opencode"]) return @"opencode";
-    if ([AgentToolNames() containsObject:displayName]) return displayName;
+    if ([AgentToolNames() containsObject:displayName]) return AgentInvocationName(displayName);
 
     NSString *name = item[@"name"] ?: @"";
     NSString *path = item[@"path"];
@@ -973,19 +1201,16 @@ static NSString *DefaultTerminalName(void) {
 }
 
 - (NSString *)launchCommandForCLIItem:(NSDictionary *)item {
-    NSString *command = [self invocationForCLIItem:item];
     NSString *label = [self friendlyAgentName:[self displayNameForItem:item]];
     if (label.length == 0) label = item[@"name"] ?: @"CLI";
-    NSString *escapedCommand = [command stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
-    NSString *escapedLabel = [label stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
-    return [NSString stringWithFormat:@"printf '\\033]0;CLI - %@\\007'; echo 'Launching %@'; echo; '%@'; echo; echo 'Session finished. Close this window or continue using the shell.'; exec ${SHELL:-/bin/zsh} -l", escapedLabel, escapedLabel, escapedCommand];
+    return [self launchCommandWithLabel:label executable:[self invocationForCLIItem:item]];
 }
 
 - (NSArray<NSString *> *)availableTerminals {
     NSMutableArray *terminals = [NSMutableArray arrayWithObject:@"Terminal"];
-    if (FindApplicationPath(@[@"Ghostty.app"])) [terminals addObject:@"Ghostty"];
-    if (FindApplicationPath(@[@"iTerm.app", @"iTerm2.app"])) [terminals addObject:@"iTerm"];
-    if (FindApplicationPath(@[@"Warp.app"])) [terminals addObject:@"Warp"];
+    for (NSDictionary *terminal in TerminalCandidates()) {
+        if (FindApplicationPath(terminal[@"apps"])) [terminals addObject:terminal[@"name"]];
+    }
     return terminals;
 }
 
@@ -1045,10 +1270,7 @@ static NSString *DefaultTerminalName(void) {
 - (NSMenuItem *)summaryMenuItem {
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
     if (@available(macOS 26.0, *)) {
-        NSUInteger outdated = 0;
-        for (NSDictionary *item in self.items) {
-            if ([item[@"status"] isEqualToString:StatusOutdated]) outdated++;
-        }
+        NSUInteger outdated = [self countWithStatus:StatusOutdated];
 
         NSRect frame = NSMakeRect(0, 0, 330, 82);
         NSGlassEffectView *glass = [[NSGlassEffectView alloc] initWithFrame:frame];
@@ -1121,12 +1343,15 @@ static NSString *DefaultTerminalName(void) {
     return row;
 }
 
-- (NSUInteger)outdatedCount {
-    NSUInteger count = 0;
-    for (NSDictionary *item in self.items) {
-        if ([item[@"status"] isEqualToString:StatusOutdated]) count++;
-    }
-    return count;
+- (NSMenuItem *)recentChangeMenuItemForChange:(NSDictionary *)change {
+    NSMenuItem *row = [[NSMenuItem alloc] initWithTitle:[self recentChangeTitle:change] action:@selector(openRecentChange:) keyEquivalent:@""];
+    NSDictionary *item = [self inventoryItemForChange:change];
+    row.target = item ? self : nil;
+    row.enabled = item != nil;
+    row.representedObject = item;
+    row.toolTip = item[@"path"];
+    row.image = [NSImage imageWithSystemSymbolName:@"checkmark.circle" accessibilityDescription:@"Recently updated"];
+    return row;
 }
 
 - (NSMenuItem *)terminalPreferenceMenuItem {
@@ -1199,7 +1424,7 @@ static NSString *DefaultTerminalName(void) {
 
     NSArray *notableUpdates = [self notableUpdateItems:14];
     if (notableUpdates.count > 0) {
-        NSUInteger totalUpdates = [self outdatedCount];
+        NSUInteger totalUpdates = [self countWithStatus:StatusOutdated];
         NSMenuItem *updatesFolder = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Updates Available  %lu", totalUpdates] action:nil keyEquivalent:@""];
         updatesFolder.image = [NSImage imageWithSystemSymbolName:@"arrow.down.circle" accessibilityDescription:@"Notable Updates"];
         NSMenu *updatesMenu = [[NSMenu alloc] initWithTitle:@"Notable Updates"];
@@ -1226,6 +1451,23 @@ static NSString *DefaultTerminalName(void) {
         [menu addItem:[NSMenuItem separatorItem]];
     }
 
+    NSArray *recentChanges = [self prunedChanges:self.recentChanges];
+    if (recentChanges.count > 0) {
+        NSMenuItem *recentFolder = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Recently Updated  %lu", recentChanges.count] action:nil keyEquivalent:@""];
+        recentFolder.image = [NSImage imageWithSystemSymbolName:@"clock.arrow.circlepath" accessibilityDescription:@"Recently Updated"];
+        NSMenu *recentMenu = [[NSMenu alloc] initWithTitle:@"Recently Updated"];
+        NSMenuItem *recentSummary = [[NSMenuItem alloc] initWithTitle:@"Installs and updates detected automatically" action:nil keyEquivalent:@""];
+        recentSummary.enabled = NO;
+        [recentMenu addItem:recentSummary];
+        [recentMenu addItem:[NSMenuItem separatorItem]];
+        for (NSDictionary *change in recentChanges) {
+            [recentMenu addItem:[self recentChangeMenuItemForChange:change]];
+        }
+        recentFolder.submenu = recentMenu;
+        [menu addItem:recentFolder];
+        [menu addItem:[NSMenuItem separatorItem]];
+    }
+
     NSUInteger shown = agents.count + notableUpdates.count;
     if (self.items.count > shown) {
         NSMenuItem *overflow = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"%lu more saved in report", self.items.count - shown] action:nil keyEquivalent:@""];
@@ -1249,7 +1491,6 @@ static NSString *DefaultTerminalName(void) {
     [menu addItem:quit];
 
     self.statusItem.menu = menu;
-    self.statusItem.button.title = [self badgeTitle];
 }
 
 - (void)refresh:(id)sender {
@@ -1259,6 +1500,7 @@ static NSString *DefaultTerminalName(void) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSArray *fresh = [self.service refresh];
         dispatch_async(dispatch_get_main_queue(), ^{
+            [self recordChangesFromItems:self.items toItems:fresh];
             self.items = fresh;
             [self saveReport];
             self.refreshing = NO;
@@ -1284,7 +1526,6 @@ static NSString *DefaultTerminalName(void) {
     if (terminal.length == 0) return;
     self.preferredTerminal = terminal;
     [[NSUserDefaults standardUserDefaults] setObject:terminal forKey:@"PreferredTerminal"];
-    [[NSUserDefaults standardUserDefaults] synchronize];
     [self rebuildMenu];
 }
 
@@ -1292,6 +1533,13 @@ static NSString *DefaultTerminalName(void) {
     NSDictionary *item = sender.representedObject;
     if (![item isKindOfClass:[NSDictionary class]]) return;
     NSString *command = [self launchCommandForAgentItem:item];
+    [self runShellCommand:command inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
+}
+
+- (void)openRecentChange:(NSMenuItem *)sender {
+    NSDictionary *item = sender.representedObject;
+    if (![item isKindOfClass:[NSDictionary class]]) return;
+    NSString *command = [self launchCommandForCLIItem:item];
     [self runShellCommand:command inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
 }
 

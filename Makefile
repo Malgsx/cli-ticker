@@ -19,7 +19,7 @@ $(BIN): Sources/CLITickerObjC/main.m $(ICON)
 	cp -R Assets/Logos/. "$(APP_DIR)/Contents/Resources/Logos/"
 	cp "$(ICON)" "$(APP_DIR)/Contents/Resources/CLITicker.icns"
 	cp Assets/AppIcon/CLIStatusTemplate.png "$(APP_DIR)/Contents/Resources/CLIStatusTemplate.png"
-	clang -fobjc-arc -framework AppKit -framework Foundation "$<" -o "$(BIN)"
+	clang -fobjc-arc -framework AppKit -framework Foundation -framework CoreServices "$<" -o "$(BIN)"
 	printf '%s\n' \
 	'<?xml version="1.0" encoding="UTF-8"?>' \
 	'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
