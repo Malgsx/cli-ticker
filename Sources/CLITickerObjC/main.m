@@ -1,5 +1,6 @@
 #import <AppKit/AppKit.h>
 #import <CoreServices/CoreServices.h>
+#import <signal.h>
 
 static NSString *const StatusCurrent = @"current";
 static NSString *const StatusOutdated = @"outdated";
@@ -12,7 +13,23 @@ static NSString *const ChangeKindUpdated = @"updated";
 static const NSTimeInterval RecentChangeLifetime = 24 * 60 * 60;
 static const NSUInteger RecentChangeCapacity = 20;
 
-static NSString *RunCommand(NSString *launchPath, NSArray<NSString *> *arguments) {
+@interface CommandResult : NSObject
+@property NSString *standardOutput;
+@property NSString *standardError;
+@property int terminationStatus;
+@property BOOL timedOut;
+@property NSString *launchError;
+@end
+
+@implementation CommandResult
+@end
+
+static CommandResult *RunCommandWithTimeout(NSString *launchPath, NSArray<NSString *> *arguments, NSTimeInterval timeout) {
+    CommandResult *result = [[CommandResult alloc] init];
+    result.standardOutput = @"";
+    result.standardError = @"";
+    result.terminationStatus = -1;
+
     NSTask *task = [[NSTask alloc] init];
     task.launchPath = launchPath;
     task.arguments = arguments;
@@ -27,16 +44,74 @@ static NSString *RunCommand(NSString *launchPath, NSArray<NSString *> *arguments
     task.standardOutput = stdoutPipe;
     task.standardError = stderrPipe;
 
+    dispatch_group_t readers = dispatch_group_create();
+    dispatch_queue_t readerQueue = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
+    __block NSData *stdoutData;
+    __block NSData *stderrData;
+    dispatch_group_async(readers, readerQueue, ^{
+        @try {
+            stdoutData = [[stdoutPipe fileHandleForReading] readDataToEndOfFile];
+        } @catch (__unused NSException *exception) {
+            stdoutData = [NSData data];
+        }
+    });
+    dispatch_group_async(readers, readerQueue, ^{
+        @try {
+            stderrData = [[stderrPipe fileHandleForReading] readDataToEndOfFile];
+        } @catch (__unused NSException *exception) {
+            stderrData = [NSData data];
+        }
+    });
+
+    dispatch_semaphore_t terminated = dispatch_semaphore_create(0);
+    task.terminationHandler = ^(__unused NSTask *finishedTask) {
+        dispatch_semaphore_signal(terminated);
+    };
+
     @try {
         [task launch];
-        [task waitUntilExit];
     } @catch (NSException *exception) {
-        return @"";
+        result.launchError = exception.reason ?: @"Unable to launch command";
+        [[stdoutPipe fileHandleForWriting] closeFile];
+        [[stderrPipe fileHandleForWriting] closeFile];
+        dispatch_group_wait(readers, DISPATCH_TIME_FOREVER);
+        return result;
     }
 
-    NSData *data = [[stdoutPipe fileHandleForReading] readDataToEndOfFile];
-    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    return text ?: @"";
+    // NSTask duplicates these descriptors for the child. Closing the parent's
+    // copies lets both readers observe EOF as soon as the child exits.
+    [[stdoutPipe fileHandleForWriting] closeFile];
+    [[stderrPipe fileHandleForWriting] closeFile];
+
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC));
+    if (dispatch_semaphore_wait(terminated, deadline) != 0) {
+        result.timedOut = YES;
+        [task terminate];
+        if (dispatch_semaphore_wait(terminated, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) != 0 && task.isRunning) {
+            kill(task.processIdentifier, SIGKILL);
+            dispatch_semaphore_wait(terminated, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+        }
+        // A descendant may still hold an inherited pipe open. Do not let that
+        // defeat the timeout guarantee while waiting for EOF.
+        [[stdoutPipe fileHandleForReading] closeFile];
+        [[stderrPipe fileHandleForReading] closeFile];
+    }
+
+    dispatch_group_wait(readers, DISPATCH_TIME_FOREVER);
+    result.standardOutput = [[NSString alloc] initWithData:stdoutData ?: [NSData data] encoding:NSUTF8StringEncoding] ?: @"";
+    result.standardError = [[NSString alloc] initWithData:stderrData ?: [NSData data] encoding:NSUTF8StringEncoding] ?: @"";
+    if (!task.isRunning) result.terminationStatus = task.terminationStatus;
+    return result;
+}
+
+static NSString *RunCommand(NSString *launchPath, NSArray<NSString *> *arguments) {
+    CommandResult *result = RunCommandWithTimeout(launchPath, arguments, 120);
+    if (result.timedOut) {
+        NSLog(@"Command timed out: %@", launchPath.lastPathComponent);
+    } else if (result.launchError.length > 0) {
+        NSLog(@"Command failed to launch: %@", launchPath.lastPathComponent);
+    }
+    return result.standardOutput;
 }
 
 static NSString *CommandPath(NSString *name) {
@@ -231,6 +306,50 @@ static NSString *EscapedAppleScriptString(NSString *string) {
 
 static NSString *ShellSingleQuoteEscaped(NSString *string) {
     return [string stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
+}
+
+static NSString *ShellQuotedArgument(NSString *argument) {
+    return [NSString stringWithFormat:@"'%@'", ShellSingleQuoteEscaped(argument ?: @"")];
+}
+
+static NSDictionary *UpdateActionForItem(NSDictionary *item, NSString *displayName) {
+    NSString *source = item[@"source"] ?: @"";
+    NSString *name = item[@"name"] ?: @"";
+    if (name.length == 0) return nil;
+
+    // These fixed vendor installers intentionally require shell pipelines. No
+    // inventory-derived value is interpolated into either script.
+    if ([displayName isEqualToString:@"cora"]) {
+        return @{@"script": @"curl -fsSL https://cora.computer/install | bash"};
+    }
+    if ([displayName isEqualToString:@"antigravity"]) {
+        return @{@"script": @"curl -fsSL https://antigravity.google/cli/install.sh | bash"};
+    }
+    if ([source isEqualToString:@"Homebrew"]) {
+        return @{@"executable": @"brew", @"arguments": @[@"upgrade", name]};
+    }
+    if ([source isEqualToString:@"Homebrew Cask"]) {
+        return @{@"executable": @"brew", @"arguments": @[@"upgrade", @"--cask", name]};
+    }
+    if ([source isEqualToString:@"npm global"]) {
+        return @{@"executable": @"npm", @"arguments": @[@"install", @"-g", name]};
+    }
+    return nil;
+}
+
+static NSString *ShellCommandForUpdateAction(NSDictionary *action) {
+    NSString *script = action[@"script"];
+    if (script.length > 0) return script;
+
+    NSString *executable = action[@"executable"];
+    NSArray<NSString *> *arguments = action[@"arguments"];
+    if (executable.length == 0 || ![arguments isKindOfClass:[NSArray class]]) return nil;
+
+    NSMutableArray<NSString *> *words = [NSMutableArray arrayWithObject:ShellQuotedArgument(executable)];
+    for (NSString *argument in arguments) {
+        [words addObject:ShellQuotedArgument(argument)];
+    }
+    return [words componentsJoinedByString:@" "];
 }
 
 static NSTextField *GlassLabel(NSString *text, NSRect frame, NSFont *font, NSColor *color, NSTextAlignment alignment) {
@@ -1023,27 +1142,8 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 }
 
 - (NSString *)updateCommandForItem:(NSDictionary *)item {
-    NSString *source = item[@"source"] ?: @"";
-    NSString *name = item[@"name"] ?: @"";
     NSString *displayName = [self displayNameForItem:item];
-    if (name.length == 0) return nil;
-
-    if ([displayName isEqualToString:@"cora"]) {
-        return @"curl -fsSL https://cora.computer/install | bash";
-    }
-    if ([displayName isEqualToString:@"antigravity"]) {
-        return @"curl -fsSL https://antigravity.google/cli/install.sh | bash";
-    }
-    if ([source isEqualToString:@"Homebrew"]) {
-        return [NSString stringWithFormat:@"brew upgrade %@", name];
-    }
-    if ([source isEqualToString:@"Homebrew Cask"]) {
-        return [NSString stringWithFormat:@"brew upgrade --cask %@", name];
-    }
-    if ([source isEqualToString:@"npm global"]) {
-        return [NSString stringWithFormat:@"npm install -g %@", name];
-    }
-    return nil;
+    return ShellCommandForUpdateAction(UpdateActionForItem(item, displayName));
 }
 
 - (NSString *)updateTerminalCommandForItem:(NSDictionary *)item {
@@ -1481,6 +1581,8 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     NSArray *notableUpdates = [self notableUpdateItems:14];
     if (notableUpdates.count > 0) {
         NSUInteger totalUpdates = [self countWithStatus:StatusOutdated];
+        NSUInteger supportedUpdates = [self allUpdateCommands].count;
+        NSUInteger manualUpdates = totalUpdates - supportedUpdates;
         NSMenuItem *updatesFolder = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Updates Available  %lu", totalUpdates] action:nil keyEquivalent:@""];
         updatesFolder.image = [NSImage imageWithSystemSymbolName:@"arrow.down.circle" accessibilityDescription:@"Notable Updates"];
         NSMenu *updatesMenu = [[NSMenu alloc] initWithTitle:@"Notable Updates"];
@@ -1488,8 +1590,9 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         updatesSummary.enabled = NO;
         [updatesMenu addItem:updatesSummary];
         [updatesMenu addItem:[NSMenuItem separatorItem]];
-        NSMenuItem *updateAll = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Update All %lu…", totalUpdates] action:@selector(updateAll:) keyEquivalent:@"u"];
+        NSMenuItem *updateAll = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Update %lu Supported %@…", supportedUpdates, supportedUpdates == 1 ? @"Tool" : @"Tools"] action:@selector(updateAll:) keyEquivalent:@"u"];
         updateAll.target = self;
+        updateAll.enabled = supportedUpdates > 0;
         updateAll.image = [NSImage imageWithSystemSymbolName:@"arrow.down.circle.fill" accessibilityDescription:@"Update All"];
         [updatesMenu addItem:updateAll];
         [updatesMenu addItem:[NSMenuItem separatorItem]];
@@ -1501,9 +1604,14 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         showAll.target = self;
         showAll.image = [NSImage imageWithSystemSymbolName:@"list.bullet.rectangle" accessibilityDescription:@"Show All Updates"];
         [updatesMenu addItem:showAll];
-        NSString *noteText = totalUpdates > notableUpdates.count
-            ? [NSString stringWithFormat:@"Showing %lu of %lu updates", notableUpdates.count, totalUpdates]
-            : @"Click an update to apply it";
+        NSString *noteText;
+        if (manualUpdates > 0) {
+            noteText = [NSString stringWithFormat:@"%lu %@ require manual updates", manualUpdates, manualUpdates == 1 ? @"tool" : @"tools"];
+        } else if (totalUpdates > notableUpdates.count) {
+            noteText = [NSString stringWithFormat:@"Showing %lu of %lu updates", notableUpdates.count, totalUpdates];
+        } else {
+            noteText = @"Click an update to apply it";
+        }
         NSMenuItem *updatesNote = [[NSMenuItem alloc] initWithTitle:noteText action:nil keyEquivalent:@""];
         updatesNote.enabled = NO;
         [updatesMenu addItem:updatesNote];
@@ -1775,6 +1883,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 }
 @end
 
+#ifndef CLITICKER_TESTING
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];
@@ -1784,3 +1893,4 @@ int main(int argc, const char *argv[]) {
     }
     return 0;
 }
+#endif

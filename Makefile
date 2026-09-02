@@ -2,9 +2,10 @@ APP_NAME := CLITicker
 BUILD_DIR := build
 APP_DIR := $(BUILD_DIR)/$(APP_NAME).app
 BIN := $(APP_DIR)/Contents/MacOS/$(APP_NAME)
+TEST_BIN := $(BUILD_DIR)/tests/CLITickerTests
 ICON := Assets/AppIcon/CLITicker.icns
 
-.PHONY: all run dist clean
+.PHONY: all run test dist clean
 
 all: $(BIN)
 
@@ -38,6 +39,13 @@ $(BIN): Sources/CLITickerObjC/main.m $(ICON)
 
 run: all
 	open "$(APP_DIR)"
+
+$(TEST_BIN): Tests/CLITickerTests.m Sources/CLITickerObjC/main.m
+	mkdir -p "$(dir $(TEST_BIN))"
+	clang -fobjc-arc -framework AppKit -framework Foundation -framework CoreServices "$<" -o "$(TEST_BIN)"
+
+test: $(TEST_BIN)
+	"$(TEST_BIN)"
 
 dist: all
 	mkdir -p "$(BUILD_DIR)/dist"
