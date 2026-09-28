@@ -6,19 +6,19 @@
 curl -fsSL https://raw.githubusercontent.com/Malgsx/cli-ticker/main/install.sh | bash
 ```
 
-This downloads the latest release into `~/Applications`, clears the Gatekeeper quarantine flag, and opens the app. Look for the new icon in your menu bar. It also installs a `cli` command.
+This downloads the latest release into `~/Applications`, clears the Gatekeeper quarantine flag, and opens the app. Look for the new icon in your menu bar. It also installs a `CLI` command. Run `CLI` to open the menu bar app.
 
 ## Update
 
 After a new release is published, run this in Terminal:
 
 ```sh
-cli update
+CLI update
 ```
 
-That replaces the app with the latest release and opens it again. `cli reload` opens the copy already installed. `cli version` prints the version and says when a newer release is out.
+That replaces the app with the latest release and opens it again. `CLI` on its own opens the app you already have. `CLI reload` quits it and opens it again. `CLI version` prints the version and says when a newer release is out.
 
-The menu bar app checks GitHub on launch and every six hours. When a release is newer than the installed app, it posts a notification and the panel footer says to run `cli update`. A push becomes that update once it is published as a release.
+The menu bar app checks GitHub on launch and every six hours. When a release is newer than the installed app, it posts a notification and the panel footer says to run `CLI update`. A push becomes that update once it is published as a release.
 
 ## What it is
 
@@ -64,7 +64,7 @@ From a clone, run `./cli uninstall`. Without a clone, paste this into Terminal:
 ```sh
 pkill -x CLITicker
 rm -rf ~/Applications/CLITicker.app ~/Library/Application\ Support/CLITicker
-if grep -q cli-ticker-command ~/.local/bin/cli 2>/dev/null; then rm -f ~/.local/bin/cli; fi
+if grep -q cli-ticker-command ~/.local/bin/CLI 2>/dev/null; then rm -f ~/.local/bin/CLI; fi
 ```
 
 ## For AI agents

@@ -1147,6 +1147,7 @@ static NSArray<NSMutableDictionary *> *WithoutPathDuplicates(NSArray<NSMutableDi
 - (void)scheduleWatcherRefresh;
 - (void)setUpPanel;
 - (void)reloadPanel;
+- (void)showPanel;
 @end
 
 static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
@@ -1389,13 +1390,13 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
         self.statusItem.button.toolTip = @"CLI";
         return;
     }
-    self.statusItem.button.toolTip = [NSString stringWithFormat:@"CLI %@ is available. Run cli update", self.latestAppVersion];
+    self.statusItem.button.toolTip = [NSString stringWithFormat:@"CLI %@ is available. Run CLI update", self.latestAppVersion];
     NSString *announced = [[NSUserDefaults standardUserDefaults] stringForKey:@"CLIAnnouncedUpdateVersion"];
     if ([announced isEqualToString:self.latestAppVersion]) return;
     [[NSUserDefaults standardUserDefaults] setObject:self.latestAppVersion forKey:@"CLIAnnouncedUpdateVersion"];
     NSUserNotification *note = [[NSUserNotification alloc] init];
     note.title = [NSString stringWithFormat:@"CLI %@ is available", self.latestAppVersion];
-    note.informativeText = @"Run cli update in Terminal.";
+    note.informativeText = @"Run CLI update in Terminal.";
     [[NSUserNotificationCenter defaultUserNotificationCenter] deliverNotification:note];
 }
 
@@ -1421,7 +1422,7 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
     NSDate *scanned = [[NSFileManager defaultManager] attributesOfItemAtPath:self.reportURL.path error:nil].fileModificationDate;
     NSString *scanDetail = self.refreshing ? @"scanning…" : (scanned ? [self relativeTimeForTimestamp:scanned.timeIntervalSince1970] : @"");
     NSString *versionDetail = [self appUpdateAvailable]
-        ? [NSString stringWithFormat:@"cli update · %@", self.latestAppVersion]
+        ? [NSString stringWithFormat:@"CLI update · %@", self.latestAppVersion]
         : (self.latestAppVersion ? [NSString stringWithFormat:@"%@ · latest", AppVersion()] : AppVersion());
     return @[
         @{@"command": TickerCommandUpdateAll, @"title": @"Update all", @"detail": [NSString stringWithFormat:@"%lu %@", (unsigned long)updates, updates == 1 ? @"update" : @"updates"], @"shortcut": @"⌘U", @"emphasis": @(updates > 0)},
@@ -2133,6 +2134,22 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
     [self.registry refreshWithInventory:self.items force:NO];
 }
 
+// Opens the panel under the menu bar icon. `CLI` with no arguments asks for this,
+// and so does opening the app again while it is already running.
+- (void)showPanel {
+    NSStatusBarButton *button = self.statusItem.button;
+    if (!button) return;
+    if (!button.window) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            NSStatusBarButton *ready = weakSelf.statusItem.button;
+            if (ready.window) [weakSelf.panel showRelativeToStatusButton:ready];
+        });
+        return;
+    }
+    [self.panel showRelativeToStatusButton:button];
+}
+
 - (void)statusItemClicked:(NSStatusBarButton *)sender {
     NSEvent *event = NSApp.currentEvent;
     BOOL secondary = event.type == NSEventTypeRightMouseUp || (event.modifierFlags & NSEventModifierFlagControl);
@@ -2302,7 +2319,7 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
     if (self.firstRunScanning) return @"first launch · scanning your machine…";
     if (self.refreshing) return @"rescanning in background…";
     if (self.registry.isChecking) return @"checking versions…";
-    if ([self appUpdateAvailable]) return [NSString stringWithFormat:@"CLI %@ is available · run cli update", self.latestAppVersion];
+    if ([self appUpdateAvailable]) return [NSString stringWithFormat:@"CLI %@ is available · run CLI update", self.latestAppVersion];
     NSDate *scanned = [[NSFileManager defaultManager] attributesOfItemAtPath:self.reportURL.path error:nil].fileModificationDate;
     NSString *when = scanned ? [self relativeTimeForTimestamp:scanned.timeIntervalSince1970] : @"never";
     return [NSString stringWithFormat:@"%lu outdated · scanned %@", [self countWithStatus:StatusOutdated], when];
@@ -2486,8 +2503,17 @@ static BOOL RegistryDumpSettled(BOOL *sawActivity, BOOL refreshing, BOOL checkin
     if (RenderPanelPreviewsIfRequested()) return;
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     self.menuController = [[MenuController alloc] init];
+    if ([[[NSProcessInfo processInfo] arguments] containsObject:@"--show"]) [self.menuController showPanel];
     [self startRegistryDumpIfRequested];
     [self startUninstallExerciseIfRequested];
+}
+
+// `open` of an already running copy (what `CLI` does) lands here. Show the panel.
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)flag {
+    (void)sender;
+    (void)flag;
+    [self.menuController showPanel];
+    return NO;
 }
 
 // `--exercise-uninstall <dir> <name> ...` waits for the inventory scan, builds the safe

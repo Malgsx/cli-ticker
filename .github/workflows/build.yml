@@ -255,9 +255,9 @@ jobs:
           sleep 10
           kill -0 "$pid" || { echo "CLITicker exited early" >&2; exit 1; }
           echo "CLITicker $installed launched from $app and is still running."
-          test -x "$HOME/.local/bin/cli"
-          grep -q cli-ticker-command "$HOME/.local/bin/cli"
-          version_out="$("$HOME/.local/bin/cli" version)"
+          test -x "$HOME/.local/bin/CLI"
+          grep -q cli-ticker-command "$HOME/.local/bin/CLI"
+          version_out="$("$HOME/.local/bin/CLI" version)"
           printf '%s\n' "$version_out" | grep -qx "CLI $installed"
           if printf '%s\n' "$version_out" | grep -q "available"; then
             echo "cli version reported an update for the release it just installed" >&2
