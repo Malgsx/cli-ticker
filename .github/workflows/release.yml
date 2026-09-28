@@ -13,8 +13,15 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Tag matches the VERSION file
+        run: |
+          version="$(./cli version)"
+          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match VERSION ($version). Bump VERSION on main, then tag v$version." >&2
+            exit 1
+          fi
       - name: Build distributable
-        run: make dist VERSION="${GITHUB_REF_NAME#v}"
+        run: ./cli dist
       - name: Verify archive
         run: |
           tar -tzf build/dist/CLITicker.app.tar.gz | grep -qx 'CLITicker.app/Contents/MacOS/CLITicker'

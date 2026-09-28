@@ -2,7 +2,7 @@
 """Download Simple Icons for every registry entry and rasterize them as
 monochrome template PNGs (black on transparent; AppKit tints them).
 
-Dev-only: the PNGs are committed, so `make` does not need this script.
+Dev-only: the PNGs are committed, so `./cli build` does not need this script.
 Requires: pip install cairosvg
 """
 import json

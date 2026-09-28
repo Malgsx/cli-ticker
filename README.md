@@ -26,9 +26,23 @@ Needs the Xcode Command Line Tools (`xcode-select --install`). Run this in any f
 git clone https://github.com/Malgsx/cli-ticker.git && cd cli-ticker && ./cli run
 ```
 
-To make it your own, click **Fork** at the top of this page, then clone your fork the same way, replacing `Malgsx` with your GitHub username. `./cli run` builds `build/CLITicker.app` and opens it. See [docs/customizing.md](docs/customizing.md) to add CLIs, change logos, rename the app, sign it, and publish your own releases.
+To make it your own, click **Fork** at the top of this page, then clone your fork the same way, replacing `Malgsx` with your GitHub username. `./cli run` builds `build/CLITicker.app` and opens it. Every project command goes through `./cli`:
+
+```sh
+./cli help       # list all commands
+./cli build      # build build/CLITicker.app
+./cli run        # build, then open the app
+./cli test       # run the unit tests
+./cli install    # build and install to ~/Applications, then launch it
+./cli uninstall  # quit and remove the installed app and its saved data
+./cli version    # print the version (from the VERSION file)
+```
+
+See [docs/customizing.md](docs/customizing.md) to add CLIs, change logos, rename the app, sign it, and publish your own releases.
 
 ## Uninstall
+
+From a clone, run `./cli uninstall`. Without a clone, paste this into Terminal:
 
 ```sh
 pkill -x CLITicker; rm -rf ~/Applications/CLITicker.app ~/Library/Application\ Support/CLITicker
@@ -58,7 +72,7 @@ To install CLI on the user's Mac, run these steps in order. Stop and report the 
    test -x ~/Applications/CLITicker.app/Contents/MacOS/CLITicker && pgrep -x CLITicker && echo ok
    ```
 
-Tell the user to look for the CLI icon in the menu bar and click it. To install without launching the app, set `CLI_TICKER_NO_LAUNCH=1` for the `bash` side of the pipe (`... | CLI_TICKER_NO_LAUNCH=1 bash`). To build from source instead, run the clone command in [Build from source / fork](#build-from-source--fork) from the user's current directory. It needs `xcode-select -p` to succeed first.
+Tell the user to look for the CLI icon in the menu bar and click it. To install without launching the app, set `CLI_TICKER_NO_LAUNCH=1` for the `bash` side of the pipe (`... | CLI_TICKER_NO_LAUNCH=1 bash`). To build from source instead, run the clone command in [Build from source / fork](#build-from-source--fork) from the user's current directory. It needs `xcode-select -p` to succeed first. Inside the clone, use `./cli <command>` for everything (`./cli help` lists them): `./cli install` puts the source build in `~/Applications` and launches it, `./cli test` runs the tests, and `./cli uninstall` removes the app and its data.
 
 ## More
 
