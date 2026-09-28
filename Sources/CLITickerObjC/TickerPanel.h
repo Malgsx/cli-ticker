@@ -30,6 +30,9 @@
 - (void)tickerPanel:(TickerPanelController *)panel selectTerminal:(NSString *)terminal;
 @optional
 - (void)tickerPanel:(TickerPanelController *)panel changeSetting:(NSString *)settingId toOption:(NSString *)option;
+// Invoked only after the in-panel update sheet's Update control is used. commands is the full
+// list, not the page on screen.
+- (void)tickerPanel:(TickerPanelController *)panel confirmUpdateCommands:(NSArray<NSString *> *)commands;
 // Invoked only after the in-panel confirmation sheet's Uninstall control is used.
 // progress is called on the main queue as each plan moves through running / removed / failed.
 - (void)tickerPanel:(TickerPanelController *)panel runUninstallPlans:(NSArray<NSDictionary *> *)plans progress:(void (^)(NSUInteger index, NSString *state, NSString *detail))progress completion:(void (^)(void))completion;
@@ -54,6 +57,8 @@ extern NSString *const TickerCommandQuit;
 extern NSString *const TickerCommandSelect;
 
 extern const NSSize TickerPanelSize;
+// Update-all confirmation shows this many commands, then another page.
+extern const NSUInteger TickerUpdatePageSize;
 
 NSImage *TickerMonogramIcon(NSString *mark);
 
@@ -66,6 +71,9 @@ NSImage *TickerMonogramIcon(NSString *mark);
 @property (readonly, getter=isSettingsVisible) BOOL settingsVisible;
 @property (readonly, getter=isSelecting) BOOL selecting;
 @property (readonly, getter=isUninstallSheetVisible) BOOL uninstallSheetVisible;
+@property (readonly, getter=isUpdateSheetVisible) BOOL updateSheetVisible;
+@property (readonly) NSUInteger updatePage;
+@property (readonly) NSUInteger updatePageCount;
 @property (readonly, copy) NSOrderedSet<NSString *> *selectedKeys;
 
 - (void)toggleRelativeToStatusButton:(NSStatusBarButton *)button;
@@ -80,6 +88,11 @@ NSImage *TickerMonogramIcon(NSString *mark);
 - (void)setPreviewSelectionKeys:(NSArray<NSString *> *)keys;
 // Shows the confirmation sheet. Nothing is uninstalled until Uninstall is pressed.
 - (void)presentUninstallConfirmation:(NSArray<NSDictionary *> *)plans;
+// Wide in-panel confirmation for Update all. commands beyond TickerUpdatePageSize paginate.
+// An empty list shows the explanation with no Update control.
+- (void)presentUpdateConfirmationWithTitle:(NSString *)title detail:(NSString *)detail commands:(NSArray<NSString *> *)commands;
+- (void)dismissUpdateConfirmation;
+- (NSArray<NSString *> *)visibleUpdateCommands;
 - (void)close;
 - (void)reload;
 

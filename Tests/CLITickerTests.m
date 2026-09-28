@@ -583,6 +583,79 @@ static void TestSelectModeConfirmsBeforeUninstall(void) {
     Assert([source.plans[1][@"command"] isEqualToString:@"brew uninstall cowsay"], @"the second plan is cowsay");
 }
 
+@interface UpdatePanelSource : RowButtonPanelSource
+@property NSArray<NSString *> *confirmed;
+@end
+
+@implementation UpdatePanelSource
+- (void)tickerPanel:(TickerPanelController *)panel confirmUpdateCommands:(NSArray<NSString *> *)commands {
+    self.confirmed = commands;
+}
+@end
+
+@interface TickerPanelController (UpdateTesting)
+- (void)confirmUpdatePressed;
+- (void)cancelUpdatePressed;
+@end
+
+static void TestUpdateConfirmationPaginatesTenPerPage(void) {
+    [NSApplication sharedApplication];
+    UpdatePanelSource *source = [[UpdatePanelSource alloc] init];
+    source.rows = @[];
+    TickerPanelController *panel = [[TickerPanelController alloc] init];
+    panel.delegate = source;
+    [panel renderContentBitmap];
+
+    NSMutableArray<NSString *> *commands = [NSMutableArray array];
+    for (NSUInteger i = 0; i < 25; i++) [commands addObject:[NSString stringWithFormat:@"brew upgrade pkg-%lu", (unsigned long)i]];
+    [panel presentUpdateConfirmationWithTitle:@"Update 25 tools?" detail:@"Opens Ghostty and runs these" commands:commands];
+    Assert(panel.updateSheetVisible, @"Update all opens the in-panel sheet");
+    Assert(TickerUpdatePageSize == 10, @"a page holds 10 commands");
+    Assert(panel.updatePage == 1 && panel.updatePageCount == 3, @"25 commands fill three pages");
+    Assert(panel.visibleUpdateCommands.count == 10, @"the first page shows 10 commands");
+    Assert([panel.visibleUpdateCommands.firstObject isEqualToString:@"brew upgrade pkg-0"], @"page 1 starts at the first command");
+    NSView *sheet = [panel valueForKey:@"updateSheet"];
+    NSButton *exitButton = [sheet valueForKey:@"exitButton"];
+    Assert([exitButton.title isEqualToString:@"Exit"], @"the card has an Exit button");
+    Assert(exitButton.action == @selector(cancelUpdatePressed) && exitButton.target == panel, @"Exit closes the card");
+    Assert(NSMaxY(exitButton.frame) < 36 && NSMinX(exitButton.frame) > NSWidth(sheet.frame) * 0.7, @"Exit sits in the top-right of the card");
+    Assert(NSWidth(sheet.frame) > NSHeight(sheet.frame), @"the confirmation is a wide box");
+    NSRect sheetInPanel = [sheet convertRect:sheet.bounds toView:panel.panel.contentView];
+    Assert(NSContainsRect(panel.panel.contentView.bounds, sheetInPanel), @"the box stays inside the panel");
+
+    PressKey(panel, @selector(moveRight:));
+    Assert(panel.updatePage == 2 && [panel.visibleUpdateCommands.firstObject isEqualToString:@"brew upgrade pkg-10"], @"right arrow shows the next 10");
+    PressKey(panel, @selector(moveRight:));
+    Assert(panel.updatePage == 3 && panel.visibleUpdateCommands.count == 5, @"the last page holds the remainder");
+    PressKey(panel, @selector(moveRight:));
+    Assert(panel.updatePage == 3, @"the last page stays put");
+    PressKey(panel, @selector(moveLeft:));
+    Assert(panel.updatePage == 2, @"left arrow goes back a page");
+
+    PressKey(panel, @selector(cancelOperation:));
+    Assert(!panel.updateSheetVisible && source.confirmed == nil, @"esc closes the sheet without updating");
+
+    [panel presentUpdateConfirmationWithTitle:@"Update 25 tools?" detail:@"Opens Ghostty and runs these" commands:commands];
+    PressKey(panel, @selector(moveRight:));
+    PressKey(panel, @selector(insertNewline:));
+    Assert(!panel.updateSheetVisible, @"return confirms and closes the sheet");
+    Assert(source.confirmed.count == 25, @"confirm includes every page, not only the one on screen");
+    Assert([source.confirmed[14] isEqualToString:@"brew upgrade pkg-14"], @"a command from a later page is included");
+
+    source.confirmed = nil;
+    [panel presentUpdateConfirmationWithTitle:@"No supported updates" detail:@"These need a manual update." commands:@[]];
+    Assert(panel.visibleUpdateCommands.count == 0 && panel.updatePageCount == 1, @"an empty plan is one blank page");
+    PressKey(panel, @selector(insertNewline:));
+    Assert(panel.updateSheetVisible && source.confirmed == nil, @"return does not run an empty plan");
+    [panel cancelUpdatePressed];
+    Assert(!panel.updateSheetVisible, @"cancel dismisses the empty plan");
+
+    [panel presentUpdateConfirmationWithTitle:@"Update 25 tools?" detail:@"Opens Ghostty and runs these" commands:commands];
+    exitButton = [[panel valueForKey:@"updateSheet"] valueForKey:@"exitButton"];
+    Assert([exitButton sendAction:exitButton.action to:exitButton.target], @"Exit sends its action");
+    Assert(!panel.updateSheetVisible && source.confirmed == nil, @"Exit closes the sheet without updating");
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         TestHamburgerMenuIsInPanelAndKeyboardDriven();
@@ -611,6 +684,7 @@ int main(int argc, const char *argv[]) {
         TestOpenCommandResolution();
         TestTerminalLaunchDoesNotBlock();
         TestSelectModeConfirmsBeforeUninstall();
+        TestUpdateConfirmationPaginatesTenPerPage();
         NSLog(@"All CLITicker tests passed.");
     }
     return 0;

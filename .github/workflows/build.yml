@@ -63,6 +63,7 @@ jobs:
           test -s build/previews/settings-preview.png
           test -s build/previews/select-mode.png
           test -s build/previews/uninstall-confirm.png
+          test -s build/previews/update-confirm.png
       - name: Detect registry CLIs on the runner
         run: |
           build/CLITicker.app/Contents/MacOS/CLITicker --dump-registry build/previews --exercise-update npm
