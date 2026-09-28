@@ -545,6 +545,7 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(x, listY, width, TickerPanelSize.height - listY - FooterHeight)];
     scrollView.drawsBackground = NO;
     scrollView.hasVerticalScroller = YES;
+    scrollView.autohidesScrollers = YES;
     scrollView.scrollerStyle = NSScrollerStyleOverlay;
     scrollView.scrollerKnobStyle = NSScrollerKnobStyleLight;
     scrollView.automaticallyAdjustsContentInsets = NO;
