@@ -88,11 +88,17 @@ NSImage *TickerMonogramIcon(NSString *mark);
 - (void)setPreviewSelectionKeys:(NSArray<NSString *> *)keys;
 // Shows the confirmation sheet. Nothing is uninstalled until Uninstall is pressed.
 - (void)presentUninstallConfirmation:(NSArray<NSDictionary *> *)plans;
-// Wide in-panel confirmation for Update all. commands beyond TickerUpdatePageSize paginate.
-// An empty list shows the explanation with no Update control.
+// In-panel confirmation for Update all and a multi-select update. Ten commands sit in a
+// horizontal box; further commands are another page. An empty list shows the explanation
+// with no Update control.
 - (void)presentUpdateConfirmationWithTitle:(NSString *)title detail:(NSString *)detail commands:(NSArray<NSString *> *)commands;
 - (void)dismissUpdateConfirmation;
 - (NSArray<NSString *> *)visibleUpdateCommands;
+// Sheet coordinates of the horizontal command box, and of one command on the current page.
+- (NSRect)visibleUpdateCommandBoxFrame;
+- (NSRect)frameForVisibleUpdateCommandAtIndex:(NSUInteger)index;
+// Footer line while a multi-select or Update all run is in the background. Empty clears it.
+- (void)noteBackgroundUpdateStatus:(NSString *)status;
 - (void)close;
 - (void)reload;
 

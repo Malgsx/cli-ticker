@@ -274,7 +274,7 @@ BOOL RenderPanelPreviewsIfRequested(void) {
         @"brew upgrade cryptography",
         nil];
     for (NSUInteger i = updateCommands.count; i < 88; i++) [updateCommands addObject:[NSString stringWithFormat:@"brew upgrade pkg-%lu", (unsigned long)i]];
-    [panel presentUpdateConfirmationWithTitle:@"Update 88 tools?" detail:@"Opens Ghostty and runs these" commands:updateCommands];
+    [panel presentUpdateConfirmationWithTitle:@"Update 88 tools?" detail:@"Opens Ghostty" commands:updateCommands];
     BOOL updateOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"update-confirm.png"], YES);
     [panel dismissUpdateConfirmation];
     [panel setSelectMode:YES];
