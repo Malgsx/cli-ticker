@@ -2261,6 +2261,13 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 
 @end
 
+// The dump waits for an inventory scan or registry check to start and then finish; being idle
+// before any work has been observed does not count, or it would record pre-refresh versions.
+static BOOL RegistryDumpSettled(BOOL *sawActivity, BOOL refreshing, BOOL checking) {
+    if (refreshing || checking) *sawActivity = YES;
+    return *sawActivity && !refreshing && !checking;
+}
+
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property MenuController *menuController;
 @end
@@ -2276,7 +2283,8 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 // `--dump-registry <dir>` waits for the first real scan and version checks, then writes
 // registry-status.json and a live render of the CLIs view, and exits. With
 // `--exercise-update <id>` it then presses that row's update button, records the streamed
-// progress and result, waits for the re-check, and dumps again. Used by CI.
+// progress and result, waits for the re-check, and dumps again. It exits non-zero when the
+// requested update could not be attempted or failed. Used by CI.
 - (void)startRegistryDumpIfRequested {
     NSArray<NSString *> *arguments = [[NSProcessInfo processInfo] arguments];
     NSUInteger flag = [arguments indexOfObject:@"--dump-registry"];
@@ -2317,7 +2325,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     void (^finish)(int) = ^(int code) {
         if (updateId) {
             NSDictionary *after = statusWithId(updateId);
-            NSDictionary *report = @{@"id": updateId, @"before": before ?: @{}, @"afterVersion": after[@"version"] ?: @"", @"afterState": after[@"state"] ?: @"",
+            NSDictionary *report = @{@"id": updateId, @"attempted": @(before != nil), @"before": before ?: @{}, @"afterVersion": after[@"version"] ?: @"", @"afterState": after[@"state"] ?: @"",
                                      @"updateState": after[@"updateState"] ?: @"", @"progress": progress};
             NSData *json = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
             [json writeToFile:[directory stringByAppendingPathComponent:@"update-exercise.json"] atomically:YES];
@@ -2332,8 +2340,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
             finish(1);
             return;
         }
-        if (controller.refreshing) sawRefresh = YES;
-        BOOL settled = sawRefresh && !controller.refreshing && !controller.registry.isChecking;
+        BOOL settled = RegistryDumpSettled(&sawRefresh, controller.refreshing, controller.registry.isChecking);
 
         if (phase == 0) {
             if (!settled) return;
@@ -2342,7 +2349,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
             if (!target || [target[@"updateCommand"] length] == 0) {
                 [timer invalidate];
                 if (updateId) fprintf(stderr, "exercise-update: %s not installed or has no update command\n", updateId.UTF8String);
-                finish(0);
+                finish(updateId ? 1 : 0);
                 return;
             }
             before = @{@"version": target[@"version"] ?: @"", @"state": target[@"state"] ?: @"", @"command": target[@"updateCommand"]};
@@ -2356,11 +2363,11 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         NSString *updateState = statusWithId(updateId)[@"updateState"];
         if (phase == 1) {
             if (![updateState isEqualToString:CLIUpdateStateSucceeded] && ![updateState isEqualToString:CLIUpdateStateFailed]) return;
-            sawRefresh = controller.refreshing;
+            sawRefresh = controller.refreshing || controller.registry.isChecking;
             phase = 2;
             return;
         }
-        if (!settled && !(controller.registry.isChecking == NO && controller.refreshing == NO)) return;
+        if (!settled) return;
         [timer invalidate];
         dump(@"-after-update");
         finish([statusWithId(updateId)[@"updateState"] isEqualToString:CLIUpdateStateFailed] ? 1 : 0);

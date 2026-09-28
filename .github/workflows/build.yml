@@ -16,6 +16,12 @@ jobs:
         run: make test
       - name: Build app
         run: make
+      - name: Registry icons are build inputs
+        run: |
+          make -q build/CLITicker.app/Contents/MacOS/CLITicker
+          touch Assets/CLIRegistry/icons/bun.png
+          if make -q build/CLITicker.app/Contents/MacOS/CLITicker; then echo "touching a registry icon did not make the app bundle stale" >&2; exit 1; fi
+          make
       - name: Verify app bundle
         run: |
           test -x build/CLITicker.app/Contents/MacOS/CLITicker
@@ -29,7 +35,14 @@ jobs:
         run: |
           build/CLITicker.app/Contents/MacOS/CLITicker --dump-registry build/previews --exercise-update npm
           cat build/previews/registry-status.json
-          cat build/previews/update-exercise.json || true
+          cat build/previews/update-exercise.json
+          python3 - <<'PY'
+          import json
+          report = json.load(open("build/previews/update-exercise.json"))
+          assert report.get("attempted") is True, "npm update exercise did not run"
+          assert report.get("updateState") == "succeeded", f"npm update exercise ended as {report.get('updateState')!r}"
+          assert report.get("progress"), "npm update exercise recorded no progress"
+          PY
       - name: Upload panel previews
         if: always()
         uses: actions/upload-artifact@v4
