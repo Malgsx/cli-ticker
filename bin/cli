@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # cli-ticker-command
-# Updates and relaunches the CLI menu bar app. Installed by install.sh as `cli`.
-#   cli update    install the latest GitHub release and open the app
-#   cli reload    open the app that is already installed
-#   cli version   print the installed version, and say when a newer release exists
+# Installed by install.sh as `CLI`.
+#   CLI           open the menu bar app
+#   CLI update    install the latest GitHub release and open the app
+#   CLI reload    quit the app and open it again
+#   CLI version   print the installed version, and say when a newer release exists
 set -euo pipefail
 
 REPO="${CLI_TICKER_REPO:-Malgsx/cli-ticker}"
@@ -13,13 +14,14 @@ APP_PATH="$INSTALL_DIR/$APP_NAME.app"
 
 usage() {
   cat <<'EOF'
-Usage: cli <command>
+Usage: CLI [command]
 
+  CLI        Open the menu bar app
   update     Install the latest release and open the app
-  reload     Open the installed app
+  reload     Quit the app and open it again
   version    Print the installed version
 
-A new release is published on GitHub. `cli update` installs that release.
+A new release is published on GitHub. `CLI update` installs that release.
 EOF
 }
 
@@ -69,17 +71,40 @@ latest_version() {
   printf '%s\n' "$tag"
 }
 
+open_app() {
+  if [[ -n "${CLI_TICKER_DRY_RUN:-}" ]]; then
+    echo "dry-run: would open $APP_PATH"
+    return 0
+  fi
+  [[ -d "$APP_PATH" ]] || {
+    echo "error: CLI is not installed at $APP_PATH. Run CLI update." >&2
+    exit 1
+  }
+  # A running copy receives this as a reopen and shows the panel. A cold start
+  # is told to show it with --show.
+  if pgrep -xq "$APP_NAME"; then
+    open "$APP_PATH"
+  else
+    open "$APP_PATH" --args --show
+  fi
+  echo "CLI is open."
+}
+
 reload_app() {
   if [[ -n "${CLI_TICKER_DRY_RUN:-}" ]]; then
     echo "dry-run: would relaunch $APP_PATH"
     return 0
   fi
   [[ -d "$APP_PATH" ]] || {
-    echo "error: CLI is not installed at $APP_PATH. Run cli update." >&2
+    echo "error: CLI is not installed at $APP_PATH. Run CLI update." >&2
     exit 1
   }
-  open "$APP_PATH"
-  echo "CLI is running. Look for its icon in the menu bar."
+  if pgrep -xq "$APP_NAME"; then
+    pkill -x "$APP_NAME" || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -xq "$APP_NAME" || break; sleep 0.2; done
+  fi
+  open "$APP_PATH" --args --show
+  echo "CLI is open."
 }
 
 install_latest() {
@@ -91,19 +116,20 @@ install_latest() {
   curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/install.sh" | CLI_TICKER_REPO="$REPO" bash
 }
 
-command="${1:-version}"
+command="${1:-open}"
 case "$command" in
   -h|--help|help) usage; exit 0 ;;
+  open|"") open_app ;;
   version)
     installed="$(installed_version || true)"
     if [[ -z "$installed" ]]; then
-      echo "CLI is not installed. Run cli update." >&2
+      echo "CLI is not installed. Run CLI update." >&2
       exit 1
     fi
     echo "CLI $installed"
     latest="$(latest_version || true)"
     if [[ -n "$latest" ]] && version_gt "$latest" "$installed"; then
-      echo "CLI $latest is available. Run cli update."
+      echo "CLI $latest is available. Run CLI update."
     fi
     ;;
   reload) reload_app ;;

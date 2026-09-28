@@ -45,10 +45,10 @@ xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist" 2>/dev/null || echo unknown)"
 echo "Installed CLI $version to $APP_PATH"
 
-# `cli update` is the user-facing command, like `claude update`. The script lives in
-# the repo as bin/cli; a piped installer downloads that same file.
+# `CLI` opens the menu bar app. `CLI update` installs the latest release.
+# The script lives in the repo as bin/cli; a piped installer downloads that same file.
 install_cli_command() {
-  local dest="${CLI_TICKER_BIN_DIR:-$HOME/.local/bin}/cli"
+  local dest="${CLI_TICKER_BIN_DIR:-$HOME/.local/bin}/CLI"
   local src=""
   if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
     local here
@@ -58,7 +58,7 @@ install_cli_command() {
   mkdir -p "$(dirname "$dest")"
   if [[ -e "$dest" ]] && ! grep -q cli-ticker-command "$dest" 2>/dev/null; then
     echo "warning: $dest already exists and is not the CLI command, so it was left alone." >&2
-    echo "Move that file, run this installer again, and then use cli update." >&2
+    echo "Move that file, run this installer again, and then use CLI update." >&2
     return 0
   fi
   if [[ -n "$src" ]]; then
@@ -69,16 +69,20 @@ install_cli_command() {
     curl -fsSL "$url" -o "$dest" || fail "could not download the cli command."
   fi
   chmod +x "$dest"
+  # The previous installer used a lowercase name. Drop that copy when it is a different file.
+  if [[ -e "$HOME/.local/bin/cli" || -L "$HOME/.local/bin/cli" ]] && [[ ! "$HOME/.local/bin/cli" -ef "$dest" ]]; then
+    if grep -q cli-ticker-command "$HOME/.local/bin/cli" 2>/dev/null; then rm -f "$HOME/.local/bin/cli"; fi
+  fi
 
   local linked=""
   local dir
   for dir in /usr/local/bin /opt/homebrew/bin; do
     [[ -d "$dir" && -w "$dir" ]] || continue
-    local link="$dir/cli"
+    local link="$dir/CLI"
     if [[ -L "$link" ]]; then
       local target
       target="$(readlink "$link")"
-      # Replace only a link we created. Leave someone else's `cli` alone.
+      # Replace only a link we created. Leave someone else's CLI alone.
       if [[ "$target" != "$dest" ]] && ! grep -q cli-ticker-command "$target" 2>/dev/null; then
         continue
       fi
@@ -97,9 +101,9 @@ install_cli_command() {
     if ! grep -q cli-ticker-command "$rc" 2>/dev/null; then
       printf '\nexport PATH="%s:$PATH" # cli-ticker-command\n' "$(dirname "$dest")" >> "$rc"
     fi
-    echo "Open a new terminal, then run: cli update"
+    echo "Open a new terminal, then run: CLI"
   else
-    echo "Later, run cli update to install a newer release."
+    echo "Run CLI to open the app. Run CLI update after a new release."
   fi
 }
 install_cli_command

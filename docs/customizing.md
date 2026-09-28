@@ -21,7 +21,7 @@ Requirements: macOS and the Xcode Command Line Tools (`xcode-select --install`).
 ./cli version    # print the version from the VERSION file
 ```
 
-Any command accepts `NAME=value` overrides of the `Makefile` variables below, for example `./cli build BUNDLE_ID=com.you.cli`. `./cli install INSTALL_DIR=/Applications` installs somewhere else.
+Any command accepts `NAME=value` overrides of the `Makefile` variables below, for example `./cli build BUNDLE_ID=com.you.cli`. `./cli install INSTALL_DIR=/Applications` installs somewhere else. The installed command is `CLI`, which opens the menu bar app. `CLI update` installs the latest published release.
 
 All paths are relative to the repository root, so the clone can live anywhere.
 

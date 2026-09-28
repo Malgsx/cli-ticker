@@ -32,7 +32,7 @@ printf '%s\n' "$out" | grep -q "to 0.10.0"
 
 out="$(CLI_TICKER_INSTALLED_VERSION=0.3.0 CLI_TICKER_LATEST_VERSION=0.9.0 "$cli" version)"
 printf '%s\n' "$out" | grep -qx "CLI 0.3.0"
-printf '%s\n' "$out" | grep -q "CLI 0.9.0 is available. Run cli update."
+printf '%s\n' "$out" | grep -q "CLI 0.9.0 is available. Run CLI update."
 
 out="$(CLI_TICKER_INSTALLED_VERSION=1.2.0 CLI_TICKER_LATEST_VERSION=1.2.0 "$cli" version)"
 printf '%s\n' "$out" | grep -qx "CLI 1.2.0"
@@ -44,7 +44,11 @@ fi
 out="$(run CLI_TICKER_INSTALLED_VERSION=0.3.0 "$cli" reload)"
 printf '%s\n' "$out" | grep -q "dry-run: would relaunch"
 
-"$cli" help | grep -q "cli update"
+out="$(run "$cli")"
+printf '%s\n' "$out" | grep -q "dry-run: would open"
+
+"$cli" help | grep -q "CLI update"
+"$cli" help | grep -q "Open the menu bar app"
 if "$cli" nope >/dev/null 2>&1; then
   echo "unknown commands should fail" >&2
   exit 1
