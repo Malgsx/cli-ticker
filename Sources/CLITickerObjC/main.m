@@ -269,12 +269,17 @@ static NSArray<NSString *> *PreferredAgentOrder(void) {
         @"notion",
         @"antigravity",
         @"claude",
+        @"gemini",
         @"amp",
         @"cora",
         @"cursor",
         @"cursor-agent",
         @"goose",
         @"opencode",
+        @"aider",
+        @"qwen",
+        @"crush",
+        @"copilot",
         @"coderabbit",
         @"kisuke",
         @"droid",
@@ -304,6 +309,15 @@ static NSDictionary<NSString *, NSString *> *PackageAliases(void) {
         aliases = @{
             @"agy": @"antigravity",
             @"@anthropic-ai/claude-code": @"claude",
+            @"@openai/codex": @"codex",
+            @"@google/gemini-cli": @"gemini",
+            @"gemini-cli": @"gemini",
+            @"aider-chat": @"aider",
+            @"aider-install": @"aider",
+            @"opencode-ai": @"opencode",
+            @"@qwen-code/qwen-code": @"qwen",
+            @"@charmland/crush": @"crush",
+            @"@github/copilot": @"copilot",
             @"@sourcegraph/amp": @"amp",
             @"@mariozechner/pi-coding-agent": @"pi",
             @"block-goose-cli": @"goose",
@@ -323,6 +337,11 @@ static NSDictionary<NSString *, NSDictionary *> *AgentBrandMetadata(void) {
             @"codex": @{@"label": @"Codex", @"mark": @"CX", @"color": [NSColor colorWithCalibratedRed:0.10 green:0.55 blue:0.42 alpha:1.0]},
             @"antigravity": @{@"label": @"Antigravity", @"mark": @"AG", @"color": [NSColor colorWithCalibratedRed:0.16 green:0.48 blue:0.92 alpha:1.0]},
             @"claude": @{@"label": @"Claude", @"mark": @"C", @"color": [NSColor colorWithCalibratedRed:0.78 green:0.34 blue:0.18 alpha:1.0]},
+            @"gemini": @{@"label": @"Gemini", @"mark": @"GE", @"color": [NSColor colorWithCalibratedRed:0.26 green:0.45 blue:0.93 alpha:1.0]},
+            @"aider": @{@"label": @"Aider", @"mark": @"AI", @"color": [NSColor colorWithCalibratedRed:0.20 green:0.60 blue:0.36 alpha:1.0]},
+            @"qwen": @{@"label": @"Qwen Code", @"mark": @"QW", @"color": [NSColor colorWithCalibratedRed:0.38 green:0.30 blue:0.86 alpha:1.0]},
+            @"crush": @{@"label": @"Crush", @"mark": @"CR", @"color": [NSColor colorWithCalibratedRed:0.86 green:0.30 blue:0.56 alpha:1.0]},
+            @"copilot": @{@"label": @"Copilot", @"mark": @"GH", @"color": [NSColor colorWithCalibratedWhite:0.20 alpha:1.0]},
             @"amp": @{@"label": @"Amp", @"mark": @"A", @"color": [NSColor colorWithCalibratedRed:0.42 green:0.27 blue:0.86 alpha:1.0]},
             @"cora": @{@"label": @"Cora", @"mark": @"CO", @"color": [NSColor colorWithCalibratedRed:0.08 green:0.56 blue:0.74 alpha:1.0]},
             @"cursor": @{@"label": @"Cursor", @"mark": @"⌘", @"color": [NSColor colorWithCalibratedWhite:0.12 alpha:1.0]},
@@ -541,7 +560,120 @@ static NSString *AgentInvocationName(NSString *canonicalName) {
     return overrides[canonicalName] ?: canonicalName;
 }
 
+static NSString *const SourceLocalBin = @"~/.local/bin";
+static NSString *const SourceAppBundle = @"App bundle";
+
+// Executables found by listing a directory rather than asking a package manager. They are
+// dropped when the PATH scan already found the same file, so each tool is listed once.
+static NSSet<NSString *> *DirectorySources(void) {
+    return [NSSet setWithArray:@[SourceLocalBin, SourceAppBundle, @"go"]];
+}
+
+// Unlisted executables whose name marks them as an AI agent (`acme-agent`, `llm`, `gpt-cli`).
+static BOOL LooksLikeAgentName(NSString *name) {
+    static NSSet<NSString *> *tokens;
+    static NSSet<NSString *> *daemonPrefixes;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        tokens = [NSSet setWithArray:@[@"agent", @"agents", @"ai", @"llm", @"gpt", @"copilot", @"coder", @"claude", @"codex", @"gemini"]];
+        // Key and credential agents (gpg-agent, ssh-agent, ...) are not AI agents.
+        daemonPrefixes = [NSSet setWithArray:@[@"gpg", @"ssh", @"keybase", @"1password", @"op", @"pageant", @"yubikey", @"secretive", @"kube", @"datadog", @"newrelic", @"zabbix"]];
+    });
+    NSCharacterSet *separators = [NSCharacterSet characterSetWithCharactersInString:@"-_./@"];
+    NSArray<NSString *> *parts = [name.lowercaseString componentsSeparatedByCharactersInSet:separators];
+    if ([daemonPrefixes containsObject:parts.firstObject ?: @""]) return NO;
+    for (NSString *token in parts) {
+        if ([tokens containsObject:token]) return YES;
+    }
+    return NO;
+}
+
+static NSArray<NSString *> *ExecutablesInDirectory(NSString *directory) {
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    for (NSString *name in [[fileManager contentsOfDirectoryAtPath:directory error:nil] sortedArrayUsingSelector:@selector(compare:)]) {
+        if ([name hasPrefix:@"."]) continue;
+        NSString *path = [directory stringByAppendingPathComponent:name];
+        BOOL isDirectory = NO;
+        if (![fileManager fileExistsAtPath:path isDirectory:&isDirectory] || isDirectory) continue;
+        if ([fileManager isExecutableFileAtPath:path]) [paths addObject:path];
+    }
+    return paths;
+}
+
+// Command-line tools shipped inside app bundles (Cursor, VS Code, Docker Desktop, ...).
+static NSArray<NSString *> *AppBundleBinDirectories(NSArray<NSString *> *applicationRoots) {
+    NSMutableArray<NSString *> *directories = [NSMutableArray array];
+    for (NSString *root in applicationRoots) {
+        for (NSString *name in [[[NSFileManager defaultManager] contentsOfDirectoryAtPath:root error:nil] sortedArrayUsingSelector:@selector(compare:)]) {
+            if (![name.pathExtension isEqualToString:@"app"]) continue;
+            NSString *contents = [[root stringByAppendingPathComponent:name] stringByAppendingPathComponent:@"Contents"];
+            for (NSString *relative in @[@"Resources/app/bin", @"Resources/bin", @"SharedSupport/bin"]) {
+                NSString *candidate = [contents stringByAppendingPathComponent:relative];
+                BOOL isDirectory = NO;
+                if ([[NSFileManager defaultManager] fileExistsAtPath:candidate isDirectory:&isDirectory] && isDirectory) [directories addObject:candidate];
+            }
+        }
+    }
+    return directories;
+}
+
+// `cargo install --list` prints "name v1.2.3:" followed by indented binary names.
+static NSArray<NSMutableDictionary *> *ParseCargoInstallList(NSString *output, NSString *binDirectory) {
+    NSMutableArray *items = [NSMutableArray array];
+    NSMutableDictionary *current = nil;
+    for (NSString *line in [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (trimmed.length == 0) continue;
+        if (![line hasPrefix:@" "] && ![line hasPrefix:@"\t"]) {
+            NSArray<NSString *> *parts = [[trimmed stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@":"]] componentsSeparatedByString:@" "];
+            if (parts.count < 2 || ![parts[1] hasPrefix:@"v"]) { current = nil; continue; }
+            current = Item(parts[0], [parts[1] substringFromIndex:1], nil, @"cargo", nil, StatusUnknown);
+            [items addObject:current];
+        } else if (current && !current[@"path"]) {
+            current[@"path"] = [binDirectory stringByAppendingPathComponent:trimmed];
+        }
+    }
+    return items;
+}
+
+// `pipx list --json` → venvs.<name>.metadata.main_package.{package_version, apps}.
+static NSArray<NSMutableDictionary *> *ParsePipxListJSON(NSString *output, NSString *binDirectory) {
+    NSData *data = [output dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    NSDictionary *venvs = [json isKindOfClass:[NSDictionary class]] ? json[@"venvs"] : nil;
+    if (![venvs isKindOfClass:[NSDictionary class]]) return @[];
+    NSMutableArray *items = [NSMutableArray array];
+    for (NSString *name in [venvs.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        NSDictionary *venv = venvs[name];
+        NSDictionary *package = [venv isKindOfClass:[NSDictionary class]] ? venv[@"metadata"][@"main_package"] : nil;
+        if (![package isKindOfClass:[NSDictionary class]]) package = @{};
+        NSString *version = [package[@"package_version"] isKindOfClass:[NSString class]] ? package[@"package_version"] : nil;
+        NSArray *apps = [package[@"apps"] isKindOfClass:[NSArray class]] ? package[@"apps"] : @[];
+        NSString *app = [apps.firstObject isKindOfClass:[NSString class]] ? apps.firstObject : nil;
+        [items addObject:Item(name, version, nil, @"pipx", app ? [binDirectory stringByAppendingPathComponent:app] : nil, StatusUnknown)];
+    }
+    return items;
+}
+
+// Drops directory-scan items whose file the PATH scan already reported (symlinks resolved).
+static NSArray<NSMutableDictionary *> *WithoutPathDuplicates(NSArray<NSMutableDictionary *> *items) {
+    NSMutableSet<NSString *> *onPath = [NSMutableSet set];
+    for (NSDictionary *item in items) {
+        if ([item[@"source"] isEqualToString:@"PATH"] && item[@"path"]) [onPath addObject:[item[@"path"] stringByResolvingSymlinksInPath]];
+    }
+    NSMutableArray *kept = [NSMutableArray arrayWithCapacity:items.count];
+    for (NSMutableDictionary *item in items) {
+        if ([DirectorySources() containsObject:item[@"source"] ?: @""] && item[@"path"] && [onPath containsObject:[item[@"path"] stringByResolvingSymlinksInPath]]) continue;
+        [kept addObject:item];
+    }
+    return kept;
+}
+
 @interface InventoryService : NSObject
+// Called on the main queue as each install source finishes: (label, items found).
+@property (copy) void (^progressHandler)(NSString *label, NSUInteger count);
++ (NSArray<NSString *> *)scanLabels;
 - (NSArray<NSMutableDictionary *> *)refresh;
 @end
 
@@ -554,26 +686,34 @@ static NSString *AgentInvocationName(NSString *canonicalName) {
     dispatch_group_t group = dispatch_group_create();
     dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
 
-    void (^addScanner)(NSArray<NSMutableDictionary *> *(^)(void)) = ^(NSArray<NSMutableDictionary *> *(^scanner)(void)) {
+    void (^progress)(NSString *, NSUInteger) = self.progressHandler;
+    void (^addScanner)(NSString *, NSArray<NSMutableDictionary *> *(^)(void)) = ^(NSString *label, NSArray<NSMutableDictionary *> *(^scanner)(void)) {
         dispatch_group_enter(group);
         dispatch_async(queue, ^{
-            NSArray<NSMutableDictionary *> *items = scanner();
+            NSArray<NSMutableDictionary *> *items = scanner() ?: @[];
             [allLock lock];
             [all addObjectsFromArray:items];
             [allLock unlock];
+            if (progress) dispatch_async(dispatch_get_main_queue(), ^{ progress(label, items.count); });
             dispatch_group_leave(group);
         });
     };
 
-    addScanner(^NSArray<NSMutableDictionary *> *{ return [self pathBinaries]; });
-    addScanner(^NSArray<NSMutableDictionary *> *{ return [self brewItemsWithCasks:NO]; });
-    addScanner(^NSArray<NSMutableDictionary *> *{ return [self brewItemsWithCasks:YES]; });
-    addScanner(^NSArray<NSMutableDictionary *> *{ return [self npmGlobals]; });
-    addScanner(^NSArray<NSMutableDictionary *> *{ return [self bunGlobals]; });
-    addScanner(^NSArray<NSMutableDictionary *> *{ return [self uvTools]; });
+    NSArray<NSString *> *labels = [InventoryService scanLabels];
+    addScanner(labels[0], ^NSArray<NSMutableDictionary *> *{ return [self pathBinaries]; });
+    addScanner(labels[1], ^NSArray<NSMutableDictionary *> *{ return [self brewItemsWithCasks:NO]; });
+    addScanner(labels[2], ^NSArray<NSMutableDictionary *> *{ return [self brewItemsWithCasks:YES]; });
+    addScanner(labels[3], ^NSArray<NSMutableDictionary *> *{ return [self npmGlobals]; });
+    addScanner(labels[4], ^NSArray<NSMutableDictionary *> *{ return [self bunGlobals]; });
+    addScanner(labels[5], ^NSArray<NSMutableDictionary *> *{ return [self uvTools]; });
+    addScanner(labels[6], ^NSArray<NSMutableDictionary *> *{ return [self pipxApps]; });
+    addScanner(labels[7], ^NSArray<NSMutableDictionary *> *{ return [self cargoInstalls]; });
+    addScanner(labels[8], ^NSArray<NSMutableDictionary *> *{ return [self goBinaries]; });
+    addScanner(labels[9], ^NSArray<NSMutableDictionary *> *{ return [self localBinaries]; });
+    addScanner(labels[10], ^NSArray<NSMutableDictionary *> *{ return [self appBundleBinaries]; });
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
 
-    for (NSMutableDictionary *item in all) {
+    for (NSMutableDictionary *item in WithoutPathDuplicates(all)) {
         NSString *key = InventoryKey(item);
         NSMutableDictionary *existing = merged[key];
         if (!existing) {
@@ -720,6 +860,66 @@ static NSString *AgentInvocationName(NSString *canonicalName) {
     return items;
 }
 
++ (NSArray<NSString *> *)scanLabels {
+    return @[@"PATH", @"Homebrew", @"casks", @"npm -g", @"bun", @"uv", @"pipx", @"cargo", @"go", @"~/.local/bin", @"/Applications"];
+}
+
+- (NSString *)userBinDirectory {
+    return [NSHomeDirectory() stringByAppendingPathComponent:@".local/bin"];
+}
+
+- (NSArray<NSMutableDictionary *> *)pipxApps {
+    NSString *pipx = CommandPath(@"pipx");
+    if (!pipx) return @[];
+    NSString *binDirectory = [RunCommand(@"/usr/bin/env", @[@"zsh", @"-lc", @"print -r -- ${PIPX_BIN_DIR:-$HOME/.local/bin}"]) stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return ParsePipxListJSON(RunCommand(pipx, @[@"list", @"--json"]), binDirectory.length > 0 ? binDirectory : [self userBinDirectory]);
+}
+
+- (NSArray<NSMutableDictionary *> *)cargoInstalls {
+    NSString *cargo = CommandPath(@"cargo");
+    NSString *binDirectory = [NSHomeDirectory() stringByAppendingPathComponent:@".cargo/bin"];
+    if (!cargo && [[NSFileManager defaultManager] isExecutableFileAtPath:[binDirectory stringByAppendingPathComponent:@"cargo"]]) {
+        cargo = [binDirectory stringByAppendingPathComponent:@"cargo"];
+    }
+    if (!cargo) return @[];
+    return ParseCargoInstallList(RunCommand(cargo, @[@"install", @"--list"]), binDirectory);
+}
+
+- (NSArray<NSMutableDictionary *> *)goBinaries {
+    NSString *go = CommandPath(@"go");
+    NSMutableOrderedSet<NSString *> *directories = [NSMutableOrderedSet orderedSet];
+    if (go) {
+        NSString *output = RunCommand(go, @[@"env", @"GOBIN", @"GOPATH"]);
+        NSArray<NSString *> *lines = [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+        NSString *gobin = lines.count > 0 ? [lines[0] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] : @"";
+        NSString *gopath = lines.count > 1 ? [[lines[1] componentsSeparatedByString:@":"].firstObject stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] : @"";
+        if (gobin.length > 0) [directories addObject:gobin];
+        if (gopath.length > 0) [directories addObject:[gopath stringByAppendingPathComponent:@"bin"]];
+    }
+    [directories addObject:[NSHomeDirectory() stringByAppendingPathComponent:@"go/bin"]];
+    NSMutableArray *items = [NSMutableArray array];
+    for (NSString *directory in directories) {
+        for (NSString *path in ExecutablesInDirectory(directory)) [items addObject:Item(path.lastPathComponent, nil, nil, @"go", path, StatusUnknown)];
+    }
+    return items;
+}
+
+// Listed directly so tools there show up even when ~/.local/bin is not on the login PATH.
+- (NSArray<NSMutableDictionary *> *)localBinaries {
+    NSMutableArray *items = [NSMutableArray array];
+    for (NSString *path in ExecutablesInDirectory([self userBinDirectory])) [items addObject:Item(path.lastPathComponent, nil, nil, SourceLocalBin, path, StatusUnknown)];
+    return items;
+}
+
+- (NSArray<NSMutableDictionary *> *)appBundleBinaries {
+    NSArray *roots = @[@"/Applications", [NSHomeDirectory() stringByAppendingPathComponent:@"Applications"]];
+    NSMutableArray *items = [NSMutableArray array];
+    for (NSString *directory in AppBundleBinDirectories(roots)) {
+        for (NSString *path in ExecutablesInDirectory(directory)) [items addObject:Item(path.lastPathComponent, nil, nil, SourceAppBundle, path, StatusUnknown)];
+    }
+    return items;
+}
+
 @end
 
 @interface MenuController : NSObject
@@ -744,6 +944,14 @@ static NSString *AgentInvocationName(NSString *canonicalName) {
 @property TickerPanelController *panel;
 @property CLIRegistryService *registry;
 @property NSMenu *classicMenu;
+// YES from a first launch (no saved inventory) until the first scan and version check finish.
+@property BOOL firstRunScanning;
+@property BOOL completedFirstScan;
+@property NSMutableDictionary<NSString *, NSNumber *> *scanProgress;
+- (NSArray<NSDictionary *> *)panelAgentRows;
+- (NSArray<NSDictionary *> *)panelOtherCLIRows;
+- (NSArray<NSDictionary *> *)panelSourceCounts;
+- (void)updateFirstRunState;
 - (void)scheduleWatcherRefresh;
 - (void)setUpPanel;
 - (void)reloadPanel;
@@ -791,12 +999,25 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     NSDictionary *markerAttributes = [[NSFileManager defaultManager] attributesOfItemAtPath:self.updateRefreshRequestURL.path error:nil];
     self.lastHandledUpdateRefreshDate = markerAttributes[NSFileModificationDate];
     self.recentChanges = @[];
+    self.firstRunScanning = ![[NSFileManager defaultManager] fileExistsAtPath:self.reportURL.path];
+    self.scanProgress = [NSMutableDictionary dictionary];
+    __weak typeof(self) weakSelf = self;
+    self.service.progressHandler = ^(NSString *label, NSUInteger count) {
+        weakSelf.scanProgress[label] = @(count);
+        [weakSelf reloadPanel];
+    };
     [self loadReport];
     [self loadRecentChanges];
     [self setUpPanel];
     [self rebuildMenu];
     [self refresh:nil];
     [self startInstallWatcher];
+    if (self.firstRunScanning && ![self launchedForAutomation]) {
+        // The installer opens the app; show the scan so a new user sees it start.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (weakSelf.statusItem.button.window) [weakSelf.panel showRelativeToStatusButton:weakSelf.statusItem.button];
+        });
+    }
 
     [NSTimer scheduledTimerWithTimeInterval:15 * 60 target:self selector:@selector(refresh:) userInfo:nil repeats:YES];
     [NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(checkForUpdateRefreshRequest:) userInfo:nil repeats:YES];
@@ -805,6 +1026,17 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 
 - (void)dealloc {
     [self stopInstallWatcher];
+}
+
+- (BOOL)launchedForAutomation {
+    for (NSString *argument in [[NSProcessInfo processInfo] arguments]) {
+        if ([argument hasPrefix:@"--"]) return YES;
+    }
+    return NO;
+}
+
+- (void)updateFirstRunState {
+    if (self.firstRunScanning && self.completedFirstScan && !self.refreshing && !self.registry.isChecking) self.firstRunScanning = NO;
 }
 
 - (void)loadReport {
@@ -1451,7 +1683,26 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         NSDictionary *item = byName[name];
         if (item) [ordered addObject:item];
     }
+    [ordered addObjectsFromArray:[self unlistedAgentTools]];
     return ordered;
+}
+
+// Executables that look like agents but are not in the curated list; shown with a generic icon.
+- (NSArray<NSDictionary *> *)unlistedAgentTools {
+    NSMutableDictionary<NSString *, NSDictionary *> *byName = [NSMutableDictionary dictionary];
+    for (NSDictionary *item in self.items) {
+        NSString *path = item[@"path"];
+        if (path.length == 0) continue;
+        NSString *name = path.lastPathComponent;
+        if ([AgentToolNames() containsObject:[self displayNameForItem:item]] || [AgentToolNames() containsObject:PackageAliases()[name] ?: name]) continue;
+        if (!LooksLikeAgentName(name) || byName[name]) continue;
+        NSMutableDictionary *generic = [item mutableCopy];
+        generic[@"genericAgent"] = @YES;
+        byName[name] = generic;
+    }
+    return [byName.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [[a[@"path"] lastPathComponent] localizedCaseInsensitiveCompare:[b[@"path"] lastPathComponent]];
+    }];
 }
 
 - (NSString *)agentRowTitle:(NSDictionary *)item {
@@ -1821,6 +2072,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 - (void)refresh:(id)sender {
     if (self.refreshing) return;
     self.refreshing = YES;
+    [self.scanProgress removeAllObjects];
     [self rebuildMenu];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSArray *fresh = [self.service refresh];
@@ -1829,9 +2081,11 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
             self.items = fresh;
             [self saveReport];
             self.refreshing = NO;
+            self.completedFirstScan = YES;
+            [self.registry refreshWithInventory:fresh force:NO];
+            [self updateFirstRunState];
             [self rebuildMenu];
             [self reloadAllUpdatesDialog];
-            [self.registry refreshWithInventory:fresh force:NO];
         });
     });
 }
@@ -2033,6 +2287,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         return ShellCommandForUpdateAction(action);
     };
     self.registry.changeHandler = ^{
+        [weakSelf updateFirstRunState];
         [weakSelf reloadPanel];
     };
     self.registry.updateFinishedHandler = ^(NSDictionary *status, BOOL succeeded) {
@@ -2063,7 +2318,8 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 }
 
 - (NSString *)shortSourceName:(NSString *)source {
-    NSDictionary *names = @{@"Homebrew": @"brew", @"Homebrew Cask": @"cask", @"npm global": @"npm", @"Bun global": @"bun", @"uv tool": @"uv", @"PATH": @"path"};
+    NSDictionary *names = @{@"Homebrew": @"brew", @"Homebrew Cask": @"cask", @"npm global": @"npm", @"Bun global": @"bun", @"uv tool": @"uv", @"PATH": @"path",
+                            SourceLocalBin: @"local", SourceAppBundle: @"app"};
     return names[source] ?: source.lowercaseString ?: @"";
 }
 
@@ -2086,8 +2342,13 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     NSMutableArray *rows = [NSMutableArray array];
     for (NSDictionary *item in [self agentTools]) {
         NSMutableDictionary *row = [[self panelRowForItem:item kind:@"agent"] mutableCopy];
-        row[@"title"] = [self friendlyAgentName:[self displayNameForItem:item]];
-        row[@"icon"] = AgentIcon([self displayNameForItem:item]);
+        if ([item[@"genericAgent"] boolValue]) {
+            row[@"title"] = [item[@"path"] lastPathComponent];
+            row[@"icon"] = TickerMonogramIcon([item[@"path"] lastPathComponent]);
+        } else {
+            row[@"title"] = [self friendlyAgentName:[self displayNameForItem:item]];
+            row[@"icon"] = AgentIcon([self displayNameForItem:item]);
+        }
         row[@"meta"] = [item[@"status"] isEqualToString:StatusOutdated] ? @"outdated" : @"open ›";
         [rows addObject:row];
     }
@@ -2135,6 +2396,59 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     return rows;
 }
 
+// Installed CLIs the registry does not know, shown after the registry rows with a generic icon.
+// Homebrew formulae count only when they put a same-named binary on PATH (skips libraries).
+- (NSArray<NSDictionary *> *)panelOtherCLIRows {
+    NSMutableSet<NSString *> *known = [NSMutableSet set];
+    for (NSDictionary *entry in self.registry.entries) {
+        for (NSString *key in @[@"id", @"bins", @"npm", @"brew", @"cask"]) {
+            id value = entry[key];
+            if ([value isKindOfClass:[NSString class]]) [known addObject:[value lastPathComponent]];
+            if ([value isKindOfClass:[NSArray class]]) for (NSString *name in value) [known addObject:name.lastPathComponent];
+        }
+    }
+    NSMutableSet<NSString *> *pathNames = [NSMutableSet set];
+    for (NSDictionary *item in self.items) {
+        if ([item[@"source"] isEqualToString:@"PATH"]) [pathNames addObject:item[@"name"] ?: @""];
+    }
+    NSSet *toolSources = [NSSet setWithArray:@[@"npm global", @"Bun global", @"uv tool", @"pipx", @"cargo", @"go", SourceLocalBin, SourceAppBundle]];
+    NSMutableDictionary<NSString *, NSDictionary *> *byName = [NSMutableDictionary dictionary];
+    for (NSDictionary *item in self.items) {
+        NSString *source = item[@"source"] ?: @"";
+        NSString *name = item[@"name"] ?: @"";
+        BOOL brewTool = [source isEqualToString:@"Homebrew"] && [pathNames containsObject:name];
+        if (name.length == 0 || (!brewTool && ![toolSources containsObject:source])) continue;
+        NSString *binary = [item[@"path"] lastPathComponent];
+        if ([known containsObject:name] || [known containsObject:name.lastPathComponent] || (binary && [known containsObject:binary])) continue;
+        NSString *key = (binary ?: name).lowercaseString;
+        if (byName[key]) continue;
+        NSMutableDictionary *row = [[self panelRowForItem:item kind:@"cli"] mutableCopy];
+        row[@"icon"] = TickerMonogramIcon(binary ?: name.lastPathComponent);
+        row[@"meta"] = [item[@"status"] isEqualToString:StatusOutdated] ? @"update ›" : @"detected";
+        byName[key] = row;
+    }
+    return [byName.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [a[@"title"] localizedCaseInsensitiveCompare:b[@"title"]];
+    }];
+}
+
+// First-launch progress: one step per install source, then the registry version check.
+- (NSDictionary *)panelScanningState {
+    if (!self.firstRunScanning) return nil;
+    NSMutableArray *steps = [NSMutableArray array];
+    for (NSString *label in [InventoryService scanLabels]) {
+        NSNumber *count = self.scanProgress[label];
+        [steps addObject:count ? @{@"label": label, @"done": @YES, @"count": count} : @{@"label": label, @"done": @NO}];
+    }
+    BOOL versionsDone = self.completedFirstScan && !self.registry.isChecking;
+    [steps addObject:@{@"label": @"versions", @"done": @(versionsDone)}];
+    return @{
+        @"title": @"Scanning your machine…",
+        @"detail": @"Looking for installed CLIs and AI agents. Only what you have will be listed. Results stay on this Mac.",
+        @"steps": steps
+    };
+}
+
 - (NSArray<NSDictionary *> *)panelAllRows {
     NSMutableArray *rows = [NSMutableArray arrayWithCapacity:self.items.count];
     for (NSDictionary *item in self.items) [rows addObject:[self panelRowForItem:item kind:@"cli"]];
@@ -2155,7 +2469,8 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 - (NSString *)panelStatusLine {
     NSString *active = [self.registry activeUpdateSummary];
     if (active.length > 0) return active;
-    if (self.refreshing) return @"scanning package managers…";
+    if (self.firstRunScanning) return @"first launch · scanning your machine…";
+    if (self.refreshing) return @"rescanning in background…";
     if (self.registry.isChecking) return @"checking versions…";
     NSDate *scanned = [[NSFileManager defaultManager] attributesOfItemAtPath:self.reportURL.path error:nil].fileModificationDate;
     NSString *when = scanned ? [self relativeTimeForTimestamp:scanned.timeIntervalSince1970] : @"never";
@@ -2163,11 +2478,13 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 }
 
 - (NSDictionary *)tickerPanelSnapshot:(TickerPanelController *)panel {
+    NSDictionary *scanning = [self panelScanningState];
     NSArray *registryRows = self.registry.statuses;
     NSUInteger registryOutdated = 0;
     for (NSDictionary *row in registryRows) if ([row[@"state"] isEqualToString:@"outdated"]) registryOutdated++;
+    NSArray *cliRows = scanning ? @[] : [registryRows arrayByAddingObjectsFromArray:[self panelOtherCLIRows]];
     NSArray *views = @[
-        @{@"id": @"clis", @"label": @"CLIs", @"symbol": @"square.stack.3d.up", @"rows": registryRows, @"columns": @[@"Name ·", @"Version", @"Via", @"Status"]},
+        @{@"id": @"clis", @"label": @"CLIs", @"symbol": @"square.stack.3d.up", @"rows": cliRows, @"columns": @[@"Name ·", @"Version", @"Via", @"Status"]},
         @{@"id": @"agents", @"label": @"Agents", @"symbol": @"sparkles", @"rows": [self panelAgentRows], @"columns": @[@"Name ·", @"Version", @"Via", @"Action"]},
         @{@"id": @"updates", @"label": @"Updates", @"symbol": @"arrow.down.circle", @"rows": [self panelUpdateRows], @"count": @([self countWithStatus:StatusOutdated]), @"columns": @[@"Name ·", @"Version", @"Via", @"Action"]},
         @{@"id": @"recent", @"label": @"Recent", @"symbol": @"clock", @"rows": [self panelRecentRows], @"columns": @[@"Name ·", @"Change", @"Via", @"When"]},
@@ -2175,14 +2492,16 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     ];
     NSUInteger outdated = [self countWithStatus:StatusOutdated];
     NSUInteger unknown = [self countWithStatus:StatusUnknown];
-    return @{
+    NSMutableDictionary *snapshot = [@{
         @"views": views,
         @"terminals": [self availableTerminals],
         @"preferredTerminal": self.preferredTerminal ?: @"",
         @"sources": [self panelSourceCounts],
         @"stats": @{@"current": @(self.items.count - outdated - unknown), @"outdated": @(outdated), @"unknown": @(unknown), @"registryOutdated": @(registryOutdated)},
         @"status": [self panelStatusLine]
-    };
+    } mutableCopy];
+    if (scanning) snapshot[@"scanning"] = scanning;
+    return snapshot;
 }
 
 - (NSArray<NSDictionary *> *)tickerPanel:(TickerPanelController *)panel rowsMatching:(NSString *)query {
@@ -2296,6 +2615,9 @@ static BOOL RegistryDumpSettled(BOOL *sawActivity, BOOL refreshing, BOOL checkin
 
     MenuController *controller = self.menuController;
     NSDate *started = [NSDate date];
+    // What the panel had before any scan finished: a first launch, or rows restored from the cache.
+    NSDictionary *startup = @{@"firstLaunch": @(controller.firstRunScanning), @"cachedRegistryRows": @(controller.registry.statuses.count), @"cachedInventoryItems": @(controller.items.count)};
+    [[NSJSONSerialization dataWithJSONObject:startup options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil] writeToFile:[directory stringByAppendingPathComponent:@"startup.json"] atomically:YES];
     NSMutableArray<NSString *> *progress = [NSMutableArray array];
     __block NSInteger phase = 0;
     __block BOOL sawRefresh = NO;
@@ -2308,6 +2630,7 @@ static BOOL RegistryDumpSettled(BOOL *sawActivity, BOOL refreshing, BOOL checkin
         return nil;
     };
     void (^dump)(NSString *) = ^(NSString *suffix) {
+        [controller updateFirstRunState];
         NSMutableArray *rows = [NSMutableArray array];
         for (NSDictionary *status in controller.registry.statuses) {
             NSMutableDictionary *row = [NSMutableDictionary dictionary];
@@ -2318,6 +2641,13 @@ static BOOL RegistryDumpSettled(BOOL *sawActivity, BOOL refreshing, BOOL checkin
         }
         NSData *json = [NSJSONSerialization dataWithJSONObject:rows options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
         [json writeToFile:[directory stringByAppendingPathComponent:[NSString stringWithFormat:@"registry-status%@.json", suffix]] atomically:YES];
+        NSMutableArray *agents = [NSMutableArray array];
+        for (NSDictionary *row in [controller panelAgentRows]) [agents addObject:@{@"title": row[@"title"] ?: @"", @"via": row[@"via"] ?: @"", @"generic": @([row[@"item"][@"genericAgent"] boolValue])}];
+        NSMutableArray *others = [NSMutableArray array];
+        for (NSDictionary *row in [controller panelOtherCLIRows]) [others addObject:@{@"title": row[@"title"] ?: @"", @"via": row[@"via"] ?: @""}];
+        NSDictionary *summary = @{@"firstRunScanning": @(controller.firstRunScanning), @"agents": agents, @"otherCLIs": others, @"sources": [controller panelSourceCounts]};
+        [[NSJSONSerialization dataWithJSONObject:summary options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil]
+            writeToFile:[directory stringByAppendingPathComponent:[NSString stringWithFormat:@"scan-summary%@.json", suffix]] atomically:YES];
         controller.panel.selectedViewId = @"clis";
         WritePanelPreviewPNG([controller.panel renderContentBitmap], [directory stringByAppendingPathComponent:[NSString stringWithFormat:@"cli-list-live%@.png", suffix]], NO);
         fprintf(stderr, "registry dump%s: %lu CLIs\n", suffix.UTF8String, (unsigned long)rows.count);

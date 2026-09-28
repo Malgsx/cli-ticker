@@ -108,7 +108,8 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 - (void)drawRect:(NSRect)dirtyRect {
     if (self.fillColor) {
         [self.fillColor setFill];
-        NSRectFillUsingOperation(dirtyRect, NSCompositingOperationSourceOver);
+        // Offscreen caching can pass a dirty rect larger than the view without clipping to it.
+        NSRectFillUsingOperation(NSIntersectionRect(dirtyRect, self.bounds), NSCompositingOperationSourceOver);
     }
     if (self.strokeColor) {
         // Drawn rather than a layer border so cacheDisplayInRect previews include it.
@@ -139,10 +140,17 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 
 @interface TickerKeyPanel : NSPanel
 @property (copy) void (^cancelHandler)(void);
+// ⌘-shortcuts; the app has no main menu while the accessory panel is key.
+@property (copy) BOOL (^commandKeyHandler)(NSString *characters);
 @end
 
 @implementation TickerKeyPanel
 - (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)performKeyEquivalent:(NSEvent *)event {
+    NSEventModifierFlags flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+    if (flags == NSEventModifierFlagCommand && self.commandKeyHandler && self.commandKeyHandler(event.charactersIgnoringModifiers.lowercaseString)) return YES;
+    return [super performKeyEquivalent:event];
+}
 - (void)cancelOperation:(id)sender {
     if (self.cancelHandler) self.cancelHandler();
 }
@@ -271,6 +279,60 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 }
 @end
 
+// First-launch state drawn over the list: title, one line of context, and a checklist of
+// install sources that ticks off as each scanner finishes.
+@interface TickerScanView : TickerFlippedView
+@property NSDictionary *state;
+@end
+
+@implementation TickerScanView
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    CGFloat x = 22;
+    CGFloat width = NSWidth(self.bounds) - x * 2;
+    NSArray<NSDictionary *> *steps = self.state[@"steps"];
+    NSUInteger done = 0;
+    for (NSDictionary *step in steps) if ([step[@"done"] boolValue]) done++;
+
+    NSDictionary *titleAttributes = @{NSFontAttributeName: TickerFont(13, NSFontWeightSemibold), NSForegroundColorAttributeName: TextBright()};
+    [self.state[@"title"] ?: @"" drawAtPoint:NSMakePoint(x, 30) withAttributes:titleAttributes];
+
+    NSMutableParagraphStyle *wrap = [[NSMutableParagraphStyle alloc] init];
+    wrap.lineBreakMode = NSLineBreakByWordWrapping;
+    wrap.lineSpacing = 2;
+    NSDictionary *detailAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: TextSecondary(), NSParagraphStyleAttributeName: wrap};
+    [self.state[@"detail"] ?: @"" drawInRect:NSMakeRect(x, 54, width, 32) withAttributes:detailAttributes];
+
+    NSInteger segments = 24;
+    CGFloat gap = 2;
+    CGFloat segmentWidth = (width - gap * (segments - 1)) / segments;
+    NSInteger filled = steps.count > 0 ? (NSInteger)round((double)done / steps.count * segments) : 0;
+    for (NSInteger i = 0; i < segments; i++) {
+        [(i < filled ? BarColor() : BarTrackColor()) setFill];
+        NSRectFillUsingOperation(NSMakeRect(x + i * (segmentWidth + gap), 96, segmentWidth, 6), NSCompositingOperationSourceOver);
+    }
+
+    NSDictionary *doneAttributes = @{NSFontAttributeName: TickerFont(10.5, NSFontWeightRegular), NSForegroundColorAttributeName: TextPrimary()};
+    NSDictionary *pendingAttributes = @{NSFontAttributeName: TickerFont(10.5, NSFontWeightRegular), NSForegroundColorAttributeName: TextDim()};
+    NSDictionary *countAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: TextDim()};
+    CGFloat columnWidth = (width - 16) / 2.0;
+    NSUInteger perColumn = (steps.count + 1) / 2;
+    for (NSUInteger i = 0; i < steps.count; i++) {
+        NSDictionary *step = steps[i];
+        BOOL isDone = [step[@"done"] boolValue];
+        CGFloat columnX = x + (i < perColumn ? 0 : columnWidth + 16);
+        CGFloat y = 116 + (i % MAX(perColumn, (NSUInteger)1)) * 19;
+        NSString *line = [NSString stringWithFormat:@"%@ %@", isDone ? @"✓" : @"·", step[@"label"] ?: @""];
+        [line drawAtPoint:NSMakePoint(columnX, y) withAttributes:isDone ? doneAttributes : pendingAttributes];
+        NSString *count = isDone ? [step[@"count"] description] : @"…";
+        if (count.length > 0) {
+            NSSize size = [count sizeWithAttributes:countAttributes];
+            [count drawAtPoint:NSMakePoint(columnX + columnWidth - size.width, y + 1) withAttributes:countAttributes];
+        }
+    }
+}
+@end
+
 @interface TickerRowView : NSTableRowView
 @property BOOL hovering;
 @end
@@ -390,6 +452,7 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 @property NSTextField *footerLeft;
 @property NSTextField *footerRight;
 @property TickerStackedBar *footerBar;
+@property TickerScanView *scanView;
 @property id globalMonitor;
 @property NSDate *lastResignDate;
 @property (weak) NSStatusBarButton *statusButton;
@@ -422,6 +485,7 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     panel.delegate = self;
     __weak typeof(self) weakSelf = self;
     panel.cancelHandler = ^{ [weakSelf close]; };
+    panel.commandKeyHandler = ^BOOL(NSString *characters) { return [weakSelf handleCommandKey:characters]; };
     self.panel = panel;
 
     NSVisualEffectView *blur = [[NSVisualEffectView alloc] initWithFrame:frame];
@@ -494,7 +558,7 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     [searchBox addSubview:self.searchField];
 
     NSArray *buttons = @[
-        [self toolbarButton:@"arrow.clockwise" tooltip:@"Refresh now (⌘R)" action:@selector(refreshPressed:)],
+        [self toolbarButton:@"arrow.clockwise" tooltip:@"Rescan this Mac for CLIs and agents (⌘R)" action:@selector(refreshPressed:)],
         [self toolbarButton:@"arrow.down.to.line" tooltip:@"Update all supported tools" action:@selector(updateAllPressed:)],
         [self toolbarButton:@"doc.text" tooltip:@"Open Markdown report" action:@selector(markdownPressed:)],
         [self toolbarButton:@"curlybraces" tooltip:@"Open JSON report" action:@selector(jsonPressed:)],
@@ -571,6 +635,11 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     scrollView.documentView = table;
     [self.root addSubview:scrollView];
     self.tableView = table;
+
+    self.scanView = [[TickerScanView alloc] initWithFrame:NSMakeRect(x, ToolbarHeight, width, TickerPanelSize.height - ToolbarHeight - FooterHeight)];
+    self.scanView.fillColor = RGBA(0.149, 0.176, 0.220, 1);
+    self.scanView.hidden = YES;
+    [self.root addSubview:self.scanView];
 }
 
 - (void)buildFooter {
@@ -640,6 +709,11 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     self.footerBar.values = @[stats[@"current"] ?: @0, stats[@"outdated"] ?: @0, stats[@"unknown"] ?: @0];
     self.footerBar.needsDisplay = YES;
     self.footerRight.stringValue = self.snapshot[@"status"] ?: @"";
+
+    NSDictionary *scanning = self.snapshot[@"scanning"];
+    self.scanView.state = [scanning isKindOfClass:[NSDictionary class]] ? scanning : nil;
+    self.scanView.hidden = self.scanView.state == nil || [self isSearching];
+    self.scanView.needsDisplay = YES;
 
     [self rebuildSidebar];
 }
@@ -889,6 +963,14 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 - (void)terminalSelected:(TickerSidebarRow *)sender {
     [self.delegate tickerPanel:self selectTerminal:sender.representedObject];
     [self reload];
+}
+
+- (BOOL)handleCommandKey:(NSString *)characters {
+    if ([characters isEqualToString:@"r"]) { [self refreshPressed:nil]; return YES; }
+    if ([characters isEqualToString:@"u"]) { [self updateAllPressed:nil]; return YES; }
+    if ([characters isEqualToString:@"q"]) { [self quitPressed:nil]; return YES; }
+    if ([characters isEqualToString:@"f"]) { [self.panel makeFirstResponder:self.searchField]; return YES; }
+    return NO;
 }
 
 - (void)refreshPressed:(id)sender { [self.delegate tickerPanel:self performCommand:TickerCommandRefresh]; }

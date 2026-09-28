@@ -45,6 +45,7 @@ static NSString *PackageDirectoryAfter(NSString *path, NSString *marker) {
 @property NSString *iconDirectory;
 @property NSURL *versionCacheURL;
 @property NSURL *githubCacheURL;
+@property NSURL *statusCacheURL;
 @property NSMutableDictionary *versionCache;
 @property NSMutableDictionary *githubCache;
 @property NSMutableDictionary<NSString *, NSImage *> *iconCache;
@@ -74,12 +75,29 @@ static NSString *PackageDirectoryAfter(NSString *path, NSString *marker) {
     self.githubCacheURL = [cacheDirectory URLByAppendingPathComponent:@"github-releases.json"];
     self.versionCache = [self loadJSONDictionary:self.versionCacheURL];
     self.githubCache = [self loadJSONDictionary:self.githubCacheURL];
+    self.statusCacheURL = [cacheDirectory URLByAppendingPathComponent:@"registry-status.json"];
     self.iconCache = [NSMutableDictionary dictionary];
     self.updateStates = [NSMutableDictionary dictionary];
     self.updateQueue = [[NSOperationQueue alloc] init];
     self.updateQueue.maxConcurrentOperationCount = 1;
-    self.statuses = @[];
+    self.statuses = [self loadCachedStatuses];
     return self;
+}
+
+// The last check's rows, so the CLIs view is filled the moment the app opens.
+- (NSArray<NSDictionary *> *)loadCachedStatuses {
+    NSData *data = [NSData dataWithContentsOfURL:self.statusCacheURL];
+    id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    if (![json isKindOfClass:[NSArray class]]) return @[];
+    NSMutableArray *rows = [NSMutableArray array];
+    for (id row in json) {
+        if ([row isKindOfClass:[NSDictionary class]] && [row[@"id"] isKindOfClass:[NSString class]] && [self entryWithId:row[@"id"]].count > 0) [rows addObject:row];
+    }
+    return rows;
+}
+
+- (BOOL)hasCachedStatuses {
+    return [[NSFileManager defaultManager] fileExistsAtPath:self.statusCacheURL.path];
 }
 
 - (NSArray<NSDictionary *> *)entries {
@@ -92,7 +110,7 @@ static NSString *PackageDirectoryAfter(NSString *path, NSString *marker) {
     return [json isKindOfClass:[NSMutableDictionary class]] ? json : [NSMutableDictionary dictionary];
 }
 
-- (void)saveJSONDictionary:(NSDictionary *)dictionary toURL:(NSURL *)url {
+- (void)saveJSONDictionary:(id)dictionary toURL:(NSURL *)url {
     NSData *data = [NSJSONSerialization dataWithJSONObject:dictionary options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
     [data writeToURL:url atomically:YES];
 }
@@ -251,6 +269,18 @@ static NSString *PackageDirectoryAfter(NSString *path, NSString *marker) {
 
 #pragma mark Refresh
 
+// Binaries the inventory found outside the login PATH (~/.local/bin, pipx, cargo, app bundles).
+// The login PATH still wins; these only fill in names it cannot resolve.
++ (NSDictionary<NSString *, NSString *> *)binaryPathsFromInventory:(NSArray<NSDictionary *> *)inventory {
+    NSMutableDictionary *paths = [NSMutableDictionary dictionary];
+    for (NSDictionary *item in inventory) {
+        NSString *path = item[@"path"];
+        if (![path isKindOfClass:[NSString class]] || path.length == 0 || paths[path.lastPathComponent]) continue;
+        if ([[NSFileManager defaultManager] isExecutableFileAtPath:path]) paths[path.lastPathComponent] = path;
+    }
+    return paths;
+}
+
 - (NSDictionary *)inventoryItemForNames:(NSArray<NSString *> *)names source:(NSString *)source inventory:(NSArray<NSDictionary *> *)inventory {
     for (NSString *name in names) {
         NSString *shortName = name.lastPathComponent;
@@ -274,7 +304,8 @@ static NSString *PackageDirectoryAfter(NSString *path, NSString *marker) {
 
     NSArray *inventory = [items copy] ?: @[];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        NSDictionary *resolved = [self resolveBinaries];
+        NSMutableDictionary *resolved = [[CLIRegistryService binaryPathsFromInventory:inventory] mutableCopy];
+        [resolved addEntriesFromDictionary:[self resolveBinaries]];
         NSMutableDictionary<NSString *, NSDictionary *> *results = [NSMutableDictionary dictionary];
         NSLock *lock = [[NSLock alloc] init];
         dispatch_group_t group = dispatch_group_create();
@@ -309,6 +340,7 @@ static NSString *PackageDirectoryAfter(NSString *path, NSString *marker) {
         }
         @synchronized (self.versionCache) { [self saveJSONDictionary:self.versionCache toURL:self.versionCacheURL]; }
         @synchronized (self.githubCache) { [self saveJSONDictionary:self.githubCache toURL:self.githubCacheURL]; }
+        [self saveJSONDictionary:ordered toURL:self.statusCacheURL];
 
         dispatch_async(dispatch_get_main_queue(), ^{
             self.statuses = ordered;
