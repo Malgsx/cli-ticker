@@ -381,7 +381,7 @@ static NSString *PackageDirectoryAfter(NSString *path, NSString *marker) {
         status[@"via"] = @"system";
     } else {
         status[@"via"] = entry[@"via"] ?: @"self";
-        [self setUpdateAction:entry[@"selfUpdate"] onStatus:status];
+        [self setUpdateAction:[CLIRegistryService selfUpdateActionForEntry:entry detectedPath:path] onStatus:status];
 
         NSDictionary *check = entry[@"check"];
         NSString *repo = entry[@"github"];
@@ -414,6 +414,18 @@ static NSString *PackageDirectoryAfter(NSString *path, NSString *marker) {
     status[@"emphasis"] = @([status[@"state"] isEqualToString:@"outdated"]);
     status[@"tooltip"] = status[@"updateCommand"] ? [NSString stringWithFormat:@"%@\nupdate: %@", path, status[@"updateCommand"]] : path;
     return status;
+}
+
+// Entries may list several binary names (flyctl / fly); only the detected one is known to exist,
+// so a self-update naming any of them runs through the detected path.
++ (NSDictionary *)selfUpdateActionForEntry:(NSDictionary *)entry detectedPath:(NSString *)path {
+    NSDictionary *action = entry[@"selfUpdate"];
+    if (![action isKindOfClass:[NSDictionary class]] || path.length == 0) return action;
+    NSString *executable = action[@"executable"];
+    if (![executable isKindOfClass:[NSString class]] || ![StringList(entry[@"bins"]) containsObject:executable]) return action;
+    NSMutableDictionary *resolved = [action mutableCopy];
+    resolved[@"executable"] = path;
+    return resolved;
 }
 
 - (void)setUpdateAction:(NSDictionary *)action onStatus:(NSMutableDictionary *)status {

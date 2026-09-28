@@ -38,6 +38,7 @@ extern NSString *const CLIUpdateStateFailed;
 // Exposed for previews and tests.
 + (NSComparisonResult)compareVersion:(NSString *)a toVersion:(NSString *)b;
 + (NSString *)versionFromOutput:(NSString *)output pattern:(NSString *)pattern;
++ (NSDictionary *)selfUpdateActionForEntry:(NSDictionary *)entry detectedPath:(NSString *)path;
 - (NSImage *)iconForEntry:(NSDictionary *)entry;
 - (NSArray<NSDictionary *> *)entries;
 @end
