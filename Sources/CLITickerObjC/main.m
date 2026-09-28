@@ -2026,12 +2026,11 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         return RunCommand(launchPath, arguments);
     };
     __weak typeof(self) weakSelf = self;
-    // Once the update-action API from PR #4 is on this branch, return
-    // UpdateActionForItem(item, [weakSelf displayNameForItem:item]) and set
-    // shellCommandForAction to ShellCommandForUpdateAction.
     self.registry.inventoryUpdateAction = ^NSDictionary *(NSDictionary *item) {
-        NSString *command = [weakSelf updateCommandForItem:item];
-        return command.length > 0 ? @{@"script": command} : nil;
+        return UpdateActionForItem(item, [weakSelf displayNameForItem:item]);
+    };
+    self.registry.shellCommandForAction = ^NSString *(NSDictionary *action) {
+        return ShellCommandForUpdateAction(action);
     };
     self.registry.changeHandler = ^{
         [weakSelf reloadPanel];
