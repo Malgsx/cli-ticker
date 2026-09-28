@@ -25,8 +25,9 @@ jobs:
         run: make previews
       - name: Detect registry CLIs on the runner
         run: |
-          build/CLITicker.app/Contents/MacOS/CLITicker --dump-registry build/previews
+          build/CLITicker.app/Contents/MacOS/CLITicker --dump-registry build/previews --exercise-update npm
           cat build/previews/registry-status.json
+          cat build/previews/update-exercise.json || true
       - name: Upload panel previews
         if: always()
         uses: actions/upload-artifact@v4

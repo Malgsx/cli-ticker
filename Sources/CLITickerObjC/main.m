@@ -1779,8 +1779,12 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         return RunCommand(launchPath, arguments);
     };
     __weak typeof(self) weakSelf = self;
-    self.registry.inventoryUpdateCommand = ^NSString *(NSDictionary *item) {
-        return [weakSelf updateCommandForItem:item];
+    // Once the update-action API from PR #4 is on this branch, return
+    // UpdateActionForItem(item, [weakSelf displayNameForItem:item]) and set
+    // shellCommandForAction to ShellCommandForUpdateAction.
+    self.registry.inventoryUpdateAction = ^NSDictionary *(NSDictionary *item) {
+        NSString *command = [weakSelf updateCommandForItem:item];
+        return command.length > 0 ? @{@"script": command} : nil;
     };
     self.registry.changeHandler = ^{
         [weakSelf reloadPanel];
@@ -2024,37 +2028,96 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 }
 
 // `--dump-registry <dir>` waits for the first real scan and version checks, then writes
-// registry-status.json and a live render of the CLIs view, and exits. Used by CI.
+// registry-status.json and a live render of the CLIs view, and exits. With
+// `--exercise-update <id>` it then presses that row's update button, records the streamed
+// progress and result, waits for the re-check, and dumps again. Used by CI.
 - (void)startRegistryDumpIfRequested {
     NSArray<NSString *> *arguments = [[NSProcessInfo processInfo] arguments];
     NSUInteger flag = [arguments indexOfObject:@"--dump-registry"];
     if (flag == NSNotFound || flag + 1 >= arguments.count) return;
     NSString *directory = arguments[flag + 1];
+    NSUInteger updateFlag = [arguments indexOfObject:@"--exercise-update"];
+    NSString *updateId = updateFlag != NSNotFound && updateFlag + 1 < arguments.count ? arguments[updateFlag + 1] : nil;
     [[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
-    NSDate *started = [NSDate date];
-    __block BOOL sawRefresh = NO;
-    MenuController *controller = self.menuController;
-    [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer) {
-        if (controller.refreshing) sawRefresh = YES;
-        BOOL settled = sawRefresh && !controller.refreshing && !controller.registry.isChecking;
-        BOOL timedOut = -[started timeIntervalSinceNow] > 300;
-        if (!settled && !timedOut) return;
-        [timer invalidate];
 
+    MenuController *controller = self.menuController;
+    NSDate *started = [NSDate date];
+    NSMutableArray<NSString *> *progress = [NSMutableArray array];
+    __block NSInteger phase = 0;
+    __block BOOL sawRefresh = NO;
+    __block NSDictionary *before = nil;
+
+    NSDictionary *(^statusWithId)(NSString *) = ^NSDictionary *(NSString *entryId) {
+        for (NSDictionary *status in controller.registry.statuses) {
+            if ([status[@"id"] isEqualToString:entryId]) return status;
+        }
+        return nil;
+    };
+    void (^dump)(NSString *) = ^(NSString *suffix) {
         NSMutableArray *rows = [NSMutableArray array];
         for (NSDictionary *status in controller.registry.statuses) {
             NSMutableDictionary *row = [NSMutableDictionary dictionary];
-            for (NSString *key in @[@"id", @"title", @"path", @"version", @"latest", @"via", @"state", @"updateCommand"]) {
+            for (NSString *key in @[@"id", @"title", @"path", @"version", @"latest", @"via", @"state", @"updateCommand", @"updateState"]) {
                 if (status[key]) row[key] = status[key];
             }
             [rows addObject:row];
         }
         NSData *json = [NSJSONSerialization dataWithJSONObject:rows options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
-        [json writeToFile:[directory stringByAppendingPathComponent:@"registry-status.json"] atomically:YES];
+        [json writeToFile:[directory stringByAppendingPathComponent:[NSString stringWithFormat:@"registry-status%@.json", suffix]] atomically:YES];
         controller.panel.selectedViewId = @"clis";
-        WritePanelPreviewPNG([controller.panel renderContentBitmap], [directory stringByAppendingPathComponent:@"cli-list-live.png"], NO);
-        fprintf(stderr, "registry dump: %lu CLIs%s\n", (unsigned long)rows.count, timedOut ? " (timed out)" : "");
-        exit(timedOut ? 1 : 0);
+        WritePanelPreviewPNG([controller.panel renderContentBitmap], [directory stringByAppendingPathComponent:[NSString stringWithFormat:@"cli-list-live%@.png", suffix]], NO);
+        fprintf(stderr, "registry dump%s: %lu CLIs\n", suffix.UTF8String, (unsigned long)rows.count);
+    };
+    void (^finish)(int) = ^(int code) {
+        if (updateId) {
+            NSDictionary *after = statusWithId(updateId);
+            NSDictionary *report = @{@"id": updateId, @"before": before ?: @{}, @"afterVersion": after[@"version"] ?: @"", @"afterState": after[@"state"] ?: @"",
+                                     @"updateState": after[@"updateState"] ?: @"", @"progress": progress};
+            NSData *json = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
+            [json writeToFile:[directory stringByAppendingPathComponent:@"update-exercise.json"] atomically:YES];
+        }
+        exit(code);
+    };
+
+    [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
+        if (-[started timeIntervalSinceNow] > 600) {
+            [timer invalidate];
+            fprintf(stderr, "registry dump timed out in phase %ld\n", (long)phase);
+            finish(1);
+            return;
+        }
+        if (controller.refreshing) sawRefresh = YES;
+        BOOL settled = sawRefresh && !controller.refreshing && !controller.registry.isChecking;
+
+        if (phase == 0) {
+            if (!settled) return;
+            dump(@"");
+            NSDictionary *target = updateId ? statusWithId(updateId) : nil;
+            if (!target || [target[@"updateCommand"] length] == 0) {
+                [timer invalidate];
+                if (updateId) fprintf(stderr, "exercise-update: %s not installed or has no update command\n", updateId.UTF8String);
+                finish(0);
+                return;
+            }
+            before = @{@"version": target[@"version"] ?: @"", @"state": target[@"state"] ?: @"", @"command": target[@"updateCommand"]};
+            [controller tickerPanel:controller.panel pressButtonOnRow:target];
+            phase = 1;
+            return;
+        }
+
+        NSString *line = [controller.registry activeUpdateSummary];
+        if (line.length > 0 && ![progress.lastObject isEqualToString:line]) [progress addObject:line];
+        NSString *updateState = statusWithId(updateId)[@"updateState"];
+        if (phase == 1) {
+            if (![updateState isEqualToString:CLIUpdateStateSucceeded] && ![updateState isEqualToString:CLIUpdateStateFailed]) return;
+            sawRefresh = controller.refreshing;
+            phase = 2;
+            return;
+        }
+        if (!settled && !(controller.registry.isChecking == NO && controller.refreshing == NO)) return;
+        [timer invalidate];
+        dump(@"-after-update");
+        finish([statusWithId(updateId)[@"updateState"] isEqualToString:CLIUpdateStateFailed] ? 1 : 0);
     }];
 }
 @end
