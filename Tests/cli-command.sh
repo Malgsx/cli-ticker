@@ -96,8 +96,11 @@ git -C "$pull_tmp/seed" remote add origin "$pull_tmp/origin"
 git -C "$pull_tmp/seed" push -u origin main >/dev/null
 git -C "$pull_tmp" clone -b main origin clone >/dev/null
 printf 'pulled\n' >> "$pull_tmp/seed/README"
+# Trace from here. A failing command under set -e otherwise exits with no text,
+# and the last "+ …" line in the log is the one that failed.
+set -x
 git -C "$pull_tmp/seed" add README
-git -C "$pull_tmp/seed" commit -m pulled >/dev/null
+git -C "$pull_tmp/seed" commit -m pulled
 # Keep going after a non-zero status so the failure text is what CI shows.
 # Git 2.55 on macOS has exited 1 from this push after a fast-forward that
 # did land, which used to abort the script before the update assertions.
