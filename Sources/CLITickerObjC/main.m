@@ -369,10 +369,12 @@ static NSString *AgentInvocationName(NSString *canonicalName) {
     NSString *output = RunCommand(brew, args);
     NSMutableDictionary *outdated = [NSMutableDictionary dictionary];
     for (NSString *line in [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
-        NSRange range = [line rangeOfString:@"<"];
+        // Verbose output is "name (installed) < latest" for formulae and "name (installed) != latest" for casks.
+        NSRange range = [line rangeOfString:@" < "];
+        if (range.location == NSNotFound) range = [line rangeOfString:@" != "];
         if (range.location == NSNotFound) continue;
         NSString *left = [[line substringToIndex:range.location] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        NSString *latest = [[line substringFromIndex:range.location + 1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        NSString *latest = [[line substringFromIndex:NSMaxRange(range)] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         NSString *name = [left componentsSeparatedByString:@" "].firstObject;
         if (name.length > 0 && latest.length > 0) outdated[name] = latest;
     }
@@ -464,7 +466,7 @@ static NSString *AgentInvocationName(NSString *canonicalName) {
         if ([line hasPrefix:@"-"] || ![line containsString:@" v"]) continue;
         NSArray *parts = [line componentsSeparatedByString:@" "];
         if (parts.count < 2) continue;
-        NSString *version = [parts[1] stringByReplacingOccurrencesOfString:@"v" withString:@""];
+        NSString *version = [parts[1] hasPrefix:@"v"] ? [parts[1] substringFromIndex:1] : parts[1];
         [items addObject:Item(parts[0], version, nil, @"uv tool", nil, StatusUnknown)];
     }
     return items;
