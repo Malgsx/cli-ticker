@@ -2444,7 +2444,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     [steps addObject:@{@"label": @"versions", @"done": @(versionsDone)}];
     return @{
         @"title": @"Scanning your machine…",
-        @"detail": @"Looking for installed CLIs and AI agents. Only what you have will be listed. Nothing leaves this Mac.",
+        @"detail": @"Looking for installed CLIs and AI agents. Only what you have will be listed. Results stay on this Mac.",
         @"steps": steps
     };
 }
