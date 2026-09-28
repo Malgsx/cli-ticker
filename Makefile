@@ -3,7 +3,7 @@
 APP_NAME := CLITicker
 DISPLAY_NAME := CLI
 BUNDLE_ID := local.codex.cliticker
-VERSION := 0.1.1
+VERSION := 0.2.0
 # Set to a "Developer ID Application: ..." identity (or "-" for ad-hoc) to sign the bundle.
 SIGN_IDENTITY :=
 CODESIGN_FLAGS := --options runtime --timestamp
@@ -16,11 +16,16 @@ SOURCES := $(wildcard Sources/CLITickerObjC/*.m)
 HEADERS := $(wildcard Sources/CLITickerObjC/*.h)
 REGISTRY_ASSETS := Assets/CLIRegistry/registry.json Assets/CLIRegistry/icons $(wildcard Assets/CLIRegistry/icons/*)
 
-.PHONY: all run test previews dist clean
+.PHONY: all run test previews dist clean icons
 
 all: $(BIN)
 
-$(ICON): scripts/generate_icon_assets.py
+# The committed .icns is used as-is so a fresh clone builds without Python/Pillow
+# (git checkout mtimes are arbitrary). Run `make icons` after editing the generator.
+$(ICON):
+	$(MAKE) icons
+
+icons:
 	python3 scripts/generate_icon_assets.py
 	iconutil -c icns Assets/AppIcon/CLITicker.iconset -o "$(ICON)"
 
