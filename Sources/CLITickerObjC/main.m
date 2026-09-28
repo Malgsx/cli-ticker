@@ -2325,7 +2325,7 @@ static BOOL RegistryDumpSettled(BOOL *sawActivity, BOOL refreshing, BOOL checkin
     void (^finish)(int) = ^(int code) {
         if (updateId) {
             NSDictionary *after = statusWithId(updateId);
-            NSDictionary *report = @{@"id": updateId, @"attempted": @(before != nil), @"before": before ?: @{}, @"afterVersion": after[@"version"] ?: @"", @"afterState": after[@"state"] ?: @"",
+            NSDictionary *report = @{@"id": updateId, @"attempted": before ? @YES : @NO, @"before": before ?: @{}, @"afterVersion": after[@"version"] ?: @"", @"afterState": after[@"state"] ?: @"",
                                      @"updateState": after[@"updateState"] ?: @"", @"progress": progress};
             NSData *json = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
             [json writeToFile:[directory stringByAppendingPathComponent:@"update-exercise.json"] atomically:YES];
