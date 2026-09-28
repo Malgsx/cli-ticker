@@ -406,7 +406,15 @@ static NSString *ShellSingleQuoteEscaped(NSString *string) {
     return [string stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
 }
 
+// Leaves plain words such as `brew`, `--cask` or `@scope/pkg@1.2` readable.
+// The safe set excludes `=`, `~` and glob characters because zsh expands them.
 static NSString *ShellQuotedArgument(NSString *argument) {
+    static NSCharacterSet *unsafeCharacters;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        unsafeCharacters = [[NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@+:,./_-"] invertedSet];
+    });
+    if (argument.length > 0 && [argument rangeOfCharacterFromSet:unsafeCharacters].location == NSNotFound) return argument;
     return [NSString stringWithFormat:@"'%@'", ShellSingleQuoteEscaped(argument ?: @"")];
 }
 
@@ -1322,19 +1330,30 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     return script;
 }
 
+// Outdated items that have an in-app update action. Several items can share
+// one command, so this can exceed allUpdateCommands.count.
+- (NSUInteger)supportedUpdateItemCount {
+    NSUInteger count = 0;
+    for (NSDictionary *item in [self notableUpdateItems:NSUIntegerMax]) {
+        if ([self updateCommandForItem:item].length > 0) count++;
+    }
+    return count;
+}
+
 - (void)updateAll:(id)sender {
     NSArray<NSString *> *commands = [self allUpdateCommands];
     if (commands.count == 0) {
-        ShowInfoAlert(@"No Updatable CLIs",
+        ShowInfoAlert(@"No Supported Updates",
                       @"None of the outdated tools support in-app updates. Use the package manager directly for these sources.",
                       @"OK");
         return;
     }
 
+    NSUInteger supportedUpdates = [self supportedUpdateItemCount];
     NSAlert *confirmAlert = [[NSAlert alloc] init];
-    confirmAlert.messageText = [NSString stringWithFormat:@"Update all %lu CLIs?", commands.count];
+    confirmAlert.messageText = [NSString stringWithFormat:@"Update %lu Supported %@?", supportedUpdates, supportedUpdates == 1 ? @"Tool" : @"Tools"];
     confirmAlert.informativeText = [NSString stringWithFormat:@"CLI will open %@ and run:\n\n%@", self.preferredTerminal, [commands componentsJoinedByString:@"\n"]];
-    [confirmAlert addButtonWithTitle:@"Update All"];
+    [confirmAlert addButtonWithTitle:@"Update"];
     [confirmAlert addButtonWithTitle:@"Cancel"];
     if ([confirmAlert runModal] != NSAlertFirstButtonReturn) return;
 
@@ -1706,8 +1725,8 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     NSArray *notableUpdates = [self notableUpdateItems:14];
     if (notableUpdates.count > 0) {
         NSUInteger totalUpdates = [self countWithStatus:StatusOutdated];
-        NSUInteger supportedUpdates = [self allUpdateCommands].count;
-        NSUInteger manualUpdates = totalUpdates - supportedUpdates;
+        NSUInteger supportedUpdates = [self supportedUpdateItemCount];
+        NSUInteger manualUpdates = totalUpdates > supportedUpdates ? totalUpdates - supportedUpdates : 0;
         NSMenuItem *updatesFolder = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Updates Available  %lu", totalUpdates] action:nil keyEquivalent:@""];
         updatesFolder.image = [NSImage imageWithSystemSymbolName:@"arrow.down.circle" accessibilityDescription:@"Notable Updates"];
         NSMenu *updatesMenu = [[NSMenu alloc] initWithTitle:@"Notable Updates"];
@@ -1731,7 +1750,9 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         [updatesMenu addItem:showAll];
         NSString *noteText;
         if (manualUpdates > 0) {
-            noteText = [NSString stringWithFormat:@"%lu %@ require manual updates", manualUpdates, manualUpdates == 1 ? @"tool" : @"tools"];
+            noteText = manualUpdates == 1
+                ? @"1 tool needs a manual update"
+                : [NSString stringWithFormat:@"%lu tools need a manual update", manualUpdates];
         } else if (totalUpdates > notableUpdates.count) {
             noteText = [NSString stringWithFormat:@"Showing %lu of %lu updates", notableUpdates.count, totalUpdates];
         } else {
@@ -1935,7 +1956,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     alert.accessoryView = scrollView;
     self.allUpdatesAlert = alert;
     [alert addButtonWithTitle:@"Done"];
-    [alert addButtonWithTitle:@"Update All…"];
+    [alert addButtonWithTitle:@"Update Supported…"];
     [alert addButtonWithTitle:@"Open Markdown Report"];
     NSModalResponse response = [alert runModal];
     self.allUpdatesAlert = nil;

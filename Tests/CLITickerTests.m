@@ -69,6 +69,17 @@ static void TestCommandReportsLaunchError(void) {
     Assert(!result.timedOut, @"launch failure should not time out");
 }
 
+static void TestUpdateCommandsReadPlainly(void) {
+    NSString *command = ShellCommandForUpdateAction(@{
+        @"executable": @"brew",
+        @"arguments": @[@"upgrade", @"--cask", @"node@20"]
+    });
+    Assert([command isEqualToString:@"brew upgrade --cask node@20"], @"plain words should not be quoted");
+    Assert([ShellQuotedArgument(@"") isEqualToString:@"''"], @"empty arguments should stay one word");
+    Assert([ShellQuotedArgument(@"=ls") isEqualToString:@"'=ls'"], @"zsh equals expansion should be quoted");
+    Assert([ShellQuotedArgument(@"a b") isEqualToString:@"'a b'"], @"spaces should be quoted");
+}
+
 static void TestUpdateArgumentsAreShellSafe(void) {
     NSString *sentinel = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
     NSString *name = [NSString stringWithFormat:@"tool name'; touch '%@'; #", sentinel];
@@ -95,6 +106,7 @@ int main(int argc, const char *argv[]) {
         TestCommandTimeoutKillsDescendants();
         TestCommandReturnsWhenBackgroundChildHoldsOutput();
         TestCommandReportsLaunchError();
+        TestUpdateCommandsReadPlainly();
         TestUpdateArgumentsAreShellSafe();
         NSLog(@"All CLITicker tests passed.");
     }
