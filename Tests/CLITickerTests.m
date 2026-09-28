@@ -98,6 +98,77 @@ static void TestUpdateArgumentsAreShellSafe(void) {
     Assert(![[NSFileManager defaultManager] fileExistsAtPath:sentinel], @"package name must not execute shell syntax");
 }
 
+static void TestSelfUpdateRunsThroughDetectedBinary(void) {
+    CLIRegistryService *registry = [[CLIRegistryService alloc] initWithRegistryURL:[NSURL fileURLWithPath:@"Assets/CLIRegistry/registry.json"]
+                                                                     iconDirectory:@"Assets/CLIRegistry/icons"
+                                                                    cacheDirectory:[NSURL fileURLWithPath:NSTemporaryDirectory()]];
+    NSDictionary *fly = nil;
+    for (NSDictionary *entry in registry.entries) {
+        if ([entry[@"id"] isEqualToString:@"flyctl"]) fly = entry;
+    }
+    Assert(fly != nil, @"registry should list Fly.io");
+    NSDictionary *action = [CLIRegistryService selfUpdateActionForEntry:fly detectedPath:@"/opt/homebrew/bin/fly"];
+    Assert([action[@"executable"] isEqualToString:@"/opt/homebrew/bin/fly"], @"fly-only installs should update through the detected fly binary");
+    Assert([action[@"arguments"] isEqualToArray:fly[@"selfUpdate"][@"arguments"]], @"self-update arguments should be preserved");
+
+    NSDictionary *external = @{@"bins": @[@"tool"], @"selfUpdate": @{@"executable": @"tool-updater", @"arguments": @[@"run"]}};
+    Assert([[CLIRegistryService selfUpdateActionForEntry:external detectedPath:@"/usr/local/bin/tool"] isEqualToDictionary:external[@"selfUpdate"]], @"updaters other than the entry's binaries should be left alone");
+    NSDictionary *script = @{@"bins": @[@"tool"], @"selfUpdate": @{@"script": @"curl example | sh"}};
+    Assert([[CLIRegistryService selfUpdateActionForEntry:script detectedPath:@"/usr/local/bin/tool"] isEqualToDictionary:script[@"selfUpdate"]], @"script updates should be left alone");
+}
+
+static void TestRegistryDumpWaitsForRefreshBeforeSettling(void) {
+    BOOL sawActivity = NO;
+    Assert(!RegistryDumpSettled(&sawActivity, NO, NO), @"idle before any refresh starts must not count as settled");
+    Assert(!RegistryDumpSettled(&sawActivity, YES, NO), @"an inventory refresh in progress is not settled");
+    Assert(!RegistryDumpSettled(&sawActivity, NO, YES), @"a registry re-check in progress is not settled");
+    Assert(RegistryDumpSettled(&sawActivity, NO, NO), @"idle after observed work is settled");
+}
+
+@interface RowButtonPanelSource : NSObject <TickerPanelDelegate>
+@property NSArray<NSDictionary *> *rows;
+@property NSDictionary *pressedRow;
+@end
+
+@implementation RowButtonPanelSource
+- (NSDictionary *)tickerPanelSnapshot:(TickerPanelController *)panel {
+    return @{@"views": @[@{@"id": @"clis", @"label": @"CLIs", @"symbol": @"square.stack.3d.up", @"rows": self.rows, @"columns": @[@"Name ·", @"Version", @"Via", @"Status"]}]};
+}
+- (NSArray<NSDictionary *> *)tickerPanel:(TickerPanelController *)panel rowsMatching:(NSString *)query { return self.rows; }
+- (void)tickerPanel:(TickerPanelController *)panel activateRow:(NSDictionary *)row {}
+- (void)tickerPanel:(TickerPanelController *)panel pressButtonOnRow:(NSDictionary *)row { self.pressedRow = row; }
+- (void)tickerPanel:(TickerPanelController *)panel copyRow:(NSDictionary *)row {}
+- (void)tickerPanel:(TickerPanelController *)panel performCommand:(NSString *)command {}
+- (void)tickerPanel:(TickerPanelController *)panel selectTerminal:(NSString *)terminal {}
+@end
+
+@interface TickerPanelController (Testing)
+- (NSTableView *)tableView;
+- (void)rowButtonPressed:(NSButton *)sender;
+@end
+
+static NSDictionary *OutdatedRegistryRow(NSString *entryId) {
+    return @{@"kind": @"registry", @"id": entryId, @"title": entryId, @"detail": @"1.0 → 2.0", @"state": @"outdated",
+             @"updateAction": @{@"executable": @"true", @"arguments": @[]}, @"updateCommand": entryId};
+}
+
+static void TestRowButtonResolvesRowFromItsView(void) {
+    [NSApplication sharedApplication];
+    RowButtonPanelSource *source = [[RowButtonPanelSource alloc] init];
+    source.rows = @[OutdatedRegistryRow(@"first"), OutdatedRegistryRow(@"second")];
+    TickerPanelController *panel = [[TickerPanelController alloc] init];
+    panel.delegate = source;
+    [panel renderContentBitmap];
+
+    NSView *cell = [panel.tableView viewAtColumn:0 row:1 makeIfNecessary:YES];
+    NSButton *button = [cell valueForKey:@"actionButton"];
+    Assert(button != nil && !button.hidden, @"outdated registry rows should show an update button");
+    // A reused cell can carry a stale row index; the press must follow the button's current row.
+    button.tag = 0;
+    [panel rowButtonPressed:button];
+    Assert([source.pressedRow[@"id"] isEqualToString:@"second"], @"update button should act on the row that holds it");
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         TestCommandCapturesBothStreams();
@@ -108,6 +179,9 @@ int main(int argc, const char *argv[]) {
         TestCommandReportsLaunchError();
         TestUpdateCommandsReadPlainly();
         TestUpdateArgumentsAreShellSafe();
+        TestSelfUpdateRunsThroughDetectedBinary();
+        TestRegistryDumpWaitsForRefreshBeforeSettling();
+        TestRowButtonResolvesRowFromItsView();
         NSLog(@"All CLITicker tests passed.");
     }
     return 0;
