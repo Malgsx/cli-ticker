@@ -29,6 +29,12 @@ static BOOL IsSystemPath(NSString *path) {
     return NO;
 }
 
+static NSString *PackageDirectoryAfter(NSString *path, NSString *marker) {
+    NSArray<NSString *> *components = path.pathComponents;
+    NSUInteger index = [components indexOfObject:marker];
+    return index != NSNotFound && index + 1 < components.count ? components[index + 1] : nil;
+}
+
 @interface CLIRegistryService ()
 @property NSArray<NSDictionary *> *registryEntries;
 @property NSString *iconDirectory;
@@ -327,18 +333,29 @@ static BOOL IsSystemPath(NSString *path) {
     if (version) status[@"version"] = version;
     status[@"state"] = @"unknown";
 
-    NSDictionary *brewItem = [self inventoryItemForNames:StringList(entry[@"brew"]) source:@"Homebrew" inventory:inventory];
-    NSDictionary *caskItem = [self inventoryItemForNames:StringList(entry[@"cask"]) source:@"Homebrew Cask" inventory:inventory];
-    NSDictionary *npmItem = [self inventoryItemForNames:StringList(entry[@"npm"]) source:@"npm global" inventory:inventory];
     NSString *resolvedTarget = [path stringByResolvingSymlinksInPath];
-    BOOL brewPath = [resolvedTarget containsString:@"/Cellar/"] || [resolvedTarget containsString:@"/Caskroom/"] || [path hasPrefix:@"/opt/homebrew/"];
     BOOL npmPath = [resolvedTarget containsString:@"/node_modules/"];
+    BOOL brewPath = [resolvedTarget containsString:@"/Cellar/"] || [resolvedTarget containsString:@"/Caskroom/"] || [path hasPrefix:@"/opt/homebrew/"];
+    NSDictionary *npmItem = [self inventoryItemForNames:StringList(entry[@"npm"]) source:@"npm global" inventory:inventory];
+    // The Cellar/Caskroom directory names the owning package even when the registry doesn't
+    // (e.g. node installed as node@24). A node_modules path means npm owns the binary.
+    NSString *cellarFormula = npmPath ? nil : PackageDirectoryAfter(resolvedTarget, @"Cellar");
+    NSString *caskroomCask = npmPath ? nil : PackageDirectoryAfter(resolvedTarget, @"Caskroom");
+    NSDictionary *brewItem = (cellarFormula ? [self inventoryItemForNames:@[cellarFormula] source:@"Homebrew" inventory:inventory] : nil)
+        ?: [self inventoryItemForNames:StringList(entry[@"brew"]) source:@"Homebrew" inventory:inventory];
+    NSDictionary *caskItem = (caskroomCask ? [self inventoryItemForNames:@[caskroomCask] source:@"Homebrew Cask" inventory:inventory] : nil)
+        ?: [self inventoryItemForNames:StringList(entry[@"cask"]) source:@"Homebrew Cask" inventory:inventory];
 
     NSDictionary *inventoryItem = nil;
-    if (brewItem && (brewPath || !npmPath)) {
+    if (IsSystemPath(path)) {
+        // The binary on PATH is Apple's; a same-named Homebrew/npm package would not change it.
+    } else if (npmPath && npmItem) {
+        inventoryItem = npmItem;
+        status[@"via"] = @"npm";
+    } else if (brewItem && (brewPath || !npmItem)) {
         inventoryItem = brewItem;
         status[@"via"] = @"brew";
-    } else if (caskItem && !npmPath) {
+    } else if (caskItem && (brewPath || !npmItem)) {
         inventoryItem = caskItem;
         status[@"via"] = @"cask";
     } else if (npmItem) {
@@ -352,15 +369,14 @@ static BOOL IsSystemPath(NSString *path) {
         status[@"state"] = outdated ? @"outdated" : @"current";
         if (outdated && inventoryItem[@"latestVersion"]) status[@"latest"] = inventoryItem[@"latestVersion"];
         if (!version && inventoryItem[@"currentVersion"]) status[@"version"] = inventoryItem[@"currentVersion"];
-        NSString *command = self.inventoryUpdateCommand ? self.inventoryUpdateCommand(inventoryItem) : nil;
-        if (command.length > 0) status[@"updateCommand"] = command;
+        [self setUpdateAction:self.inventoryUpdateAction ? self.inventoryUpdateAction(inventoryItem) : nil onStatus:status];
         status[@"inventoryItem"] = inventoryItem;
     } else if (IsSystemPath(path) && !entry[@"selfUpdate"]) {
         status[@"state"] = @"system";
         status[@"via"] = @"system";
     } else {
         status[@"via"] = entry[@"via"] ?: @"self";
-        if ([entry[@"selfUpdate"] isKindOfClass:[NSString class]]) status[@"updateCommand"] = entry[@"selfUpdate"];
+        [self setUpdateAction:entry[@"selfUpdate"] onStatus:status];
 
         NSDictionary *check = entry[@"check"];
         NSString *repo = entry[@"github"];
@@ -393,6 +409,22 @@ static BOOL IsSystemPath(NSString *path) {
     status[@"emphasis"] = @([status[@"state"] isEqualToString:@"outdated"]);
     status[@"tooltip"] = status[@"updateCommand"] ? [NSString stringWithFormat:@"%@\nupdate: %@", path, status[@"updateCommand"]] : path;
     return status;
+}
+
+- (void)setUpdateAction:(NSDictionary *)action onStatus:(NSMutableDictionary *)status {
+    if (![action isKindOfClass:[NSDictionary class]]) return;
+    BOOL argv = [action[@"executable"] isKindOfClass:[NSString class]] && [action[@"arguments"] isKindOfClass:[NSArray class]];
+    BOOL script = [action[@"script"] isKindOfClass:[NSString class]] && [action[@"script"] length] > 0;
+    if (!argv && !script) return;
+    NSString *command = self.shellCommandForAction ? self.shellCommandForAction(action) : nil;
+    if (command.length == 0) {
+        NSMutableArray *words = [NSMutableArray array];
+        if (script) [words addObject:action[@"script"]];
+        else for (NSString *word in [@[action[@"executable"]] arrayByAddingObjectsFromArray:action[@"arguments"]]) [words addObject:ShellQuote(word)];
+        command = [words componentsJoinedByString:@" "];
+    }
+    status[@"updateAction"] = action;
+    status[@"updateCommand"] = command;
 }
 
 #pragma mark Status presentation
@@ -449,8 +481,9 @@ static BOOL IsSystemPath(NSString *path) {
 
 - (void)runUpdateForStatus:(NSDictionary *)status {
     NSString *entryId = status[@"id"];
+    NSDictionary *action = status[@"updateAction"];
     NSString *command = status[@"updateCommand"];
-    if (entryId.length == 0 || command.length == 0) return;
+    if (entryId.length == 0 || ![action isKindOfClass:[NSDictionary class]] || command.length == 0) return;
     NSString *current = self.updateStates[entryId][@"state"];
     if ([current isEqualToString:CLIUpdateStateRunning] || [current isEqualToString:CLIUpdateStateQueued]) return;
 
@@ -464,7 +497,7 @@ static BOOL IsSystemPath(NSString *path) {
             update[@"line"] = command;
             [self notifyChange];
         });
-        int exitCode = [self executeUpdateCommand:command progress:^(NSString *line) {
+        int exitCode = [self executeUpdateAction:action progress:^(NSString *line) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 update[@"line"] = line;
                 [self notifyChange];
@@ -495,13 +528,35 @@ static BOOL IsSystemPath(NSString *path) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ProbeBudget * NSEC_PER_SEC)), dispatch_get_main_queue(), mark);
 }
 
-// Streams combined stdout/stderr line by line so the panel can show live progress.
-// stdin is /dev/null: updates never block on an interactive prompt.
-- (int)executeUpdateCommand:(NSString *)command progress:(void (^)(NSString *line))progress {
+- (NSString *)executablePathForName:(NSString *)name {
+    if ([name containsString:@"/"]) return name;
+    for (NSString *directory in [self.loginPath componentsSeparatedByString:@":"]) {
+        if (directory.length == 0) continue;
+        NSString *candidate = [directory stringByAppendingPathComponent:name];
+        if ([[NSFileManager defaultManager] isExecutableFileAtPath:candidate]) return candidate;
+    }
+    return nil;
+}
+
+// Streams combined stdout/stderr line by line so the panel can show live progress, which the
+// app's buffered command runner does not offer. Argv actions run without a shell; only fixed
+// vendor scripts go through zsh. stdin is /dev/null so updates never block on a prompt.
+- (int)executeUpdateAction:(NSDictionary *)action progress:(void (^)(NSString *line))progress {
     NSTask *task = [[NSTask alloc] init];
-    task.launchPath = @"/usr/bin/env";
-    task.arguments = @[@"zsh", @"-lc", command];
+    if ([action[@"script"] length] > 0) {
+        task.launchPath = @"/bin/zsh";
+        task.arguments = @[@"-lc", action[@"script"]];
+    } else {
+        NSString *executable = [self executablePathForName:action[@"executable"]];
+        if (!executable) {
+            progress([NSString stringWithFormat:@"%@ not found on PATH", action[@"executable"]]);
+            return 127;
+        }
+        task.launchPath = executable;
+        task.arguments = action[@"arguments"];
+    }
     NSMutableDictionary *environment = [[[NSProcessInfo processInfo] environment] mutableCopy];
+    if (self.loginPath.length > 0) environment[@"PATH"] = self.loginPath;
     environment[@"HOMEBREW_NO_AUTO_UPDATE"] = @"1";
     environment[@"HOMEBREW_NO_ANALYTICS"] = @"1";
     environment[@"HOMEBREW_NO_INSTALL_CLEANUP"] = @"1";

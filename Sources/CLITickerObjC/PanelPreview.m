@@ -23,7 +23,7 @@
     row[@"state"] = state;
     row[@"detail"] = latest ? [NSString stringWithFormat:@"%@ → %@", version, latest] : version;
     row[@"emphasis"] = @(latest != nil);
-    if ([state isEqualToString:@"outdated"]) row[@"updateCommand"] = @"fixture";
+    if ([state isEqualToString:@"outdated"]) { row[@"updateAction"] = @{@"executable": @"true", @"arguments": @[]}; row[@"updateCommand"] = @"fixture"; }
     if (updateState) row[@"updateState"] = updateState;
     return row;
 }
