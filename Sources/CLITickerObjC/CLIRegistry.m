@@ -425,7 +425,7 @@ static NSString *PackageDirectoryAfter(NSString *path, NSString *marker) {
     if (command.length == 0) {
         NSMutableArray *words = [NSMutableArray array];
         if (script) [words addObject:action[@"script"]];
-        else for (NSString *word in [@[action[@"executable"]] arrayByAddingObjectsFromArray:action[@"arguments"]]) [words addObject:ShellQuote(word)];
+        else for (NSString *word in [@[action[@"executable"]] arrayByAddingObjectsFromArray:action[@"arguments"]]) [words addObject:DisplayWord(word)];
         command = [words componentsJoinedByString:@" "];
     }
     status[@"updateAction"] = action;
