@@ -93,9 +93,9 @@ If a downloaded build is ever blocked by Gatekeeper, run `xattr -dr com.apple.qu
 
 ## Opening a CLI and uninstalling
 
-A row click or Return runs that CLI in the preferred terminal. The command is argv, then quoted for the terminal the same way update commands are. Agents launch with no extra arguments. Other CLIs run with `--help` unless `open` in `registry.json` says otherwise. The `↑ update` button stays a separate control.
+A row click or Return runs that CLI in the preferred terminal from Settings (`PreferredTerminal` in user defaults). The launch request names the app by bundle id: Ghostty is `com.mitchellh.ghostty`, iTerm is `com.googlecode.iterm2`, Warp is `dev.warp.Warp-Stable`, Alacritty is `org.alacritty`, and Terminal.app is `com.apple.Terminal`. Agents launch with no extra arguments. Other CLIs run with `--help` unless `open` in `registry.json` says otherwise. If the saved terminal isn't installed, the panel footer says so and the click opens Terminal.app only after that. The launch itself runs off the main queue. The `↑ update` button stays a separate control.
 
-Select mode (toolbar or the ☰ item) checks rows that have a safe uninstall for their install source. The confirmation sheet lists each command and is the only way the panel starts an uninstall. `./cli test` covers the uninstall builder, selection, and open-command resolution. The uninstall CI job installs `tree` and `cowsay`, then runs `build/CLITicker.app/Contents/MacOS/CLITicker --exercise-uninstall <dir> tree cowsay` after `./cli build`.
+Select mode (toolbar or the ☰ item) checks rows that have a safe uninstall for their install source. The confirmation sheet lists each command and is the only way the panel starts an uninstall. `./cli test` covers the uninstall builder, selection, open-command resolution, and which bundle each preferred terminal launches. CI also runs `build/CLITicker.app/Contents/MacOS/CLITicker --exercise-terminal-launch <file> Ghostty Terminal` and checks that those two requests name different apps (`com.mitchellh.ghostty` and `com.apple.Terminal`). The uninstall CI job installs `tree` and `cowsay`, then runs `build/CLITicker.app/Contents/MacOS/CLITicker --exercise-uninstall <dir> tree cowsay` after `./cli build`.
 
 ## How scanning works
 
