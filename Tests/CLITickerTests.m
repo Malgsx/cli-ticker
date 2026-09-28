@@ -299,8 +299,95 @@ static void TestPanelShowsScanningStateOnlyWhileScanning(void) {
     Assert(scanView.hidden, @"the scanning view should go away once results are in");
 }
 
+@interface MenuPanelSource : RowButtonPanelSource
+@property NSMutableArray<NSString *> *commands;
+@property NSMutableArray<NSString *> *settingChanges;
+@end
+
+@implementation MenuPanelSource
+- (NSDictionary *)tickerPanelSnapshot:(TickerPanelController *)panel {
+    NSMutableDictionary *snapshot = [[super tickerPanelSnapshot:panel] mutableCopy];
+    snapshot[@"menu"] = @[
+        @{@"command": TickerCommandUpdateAll, @"title": @"Update all", @"shortcut": @"⌘U"},
+        @{@"command": TickerCommandRefresh, @"title": @"Check for updates / rescan", @"shortcut": @"⌘R"},
+        @{@"command": TickerCommandSettings, @"title": @"Settings", @"separator": @YES},
+        @{@"command": TickerCommandQuit, @"title": @"Quit", @"separator": @YES}
+    ];
+    snapshot[@"settings"] = @[
+        @{@"id": @"terminal", @"label": @"Preferred terminal", @"options": @[@"Terminal", @"Ghostty"], @"index": @0},
+        @{@"id": @"refreshInterval", @"label": @"Rescan every", @"options": @[@"5 min", @"15 min", @"off"], @"index": @1}
+    ];
+    return snapshot;
+}
+- (void)tickerPanel:(TickerPanelController *)panel performCommand:(NSString *)command { [self.commands addObject:command]; }
+- (void)tickerPanel:(TickerPanelController *)panel changeSetting:(NSString *)settingId toOption:(NSString *)option {
+    [self.settingChanges addObject:[NSString stringWithFormat:@"%@=%@", settingId, option]];
+}
+@end
+
+@interface TickerPanelController (MenuTesting) <NSTextFieldDelegate>
+- (void)menuPressed:(id)sender;
+- (void)cancel;
+@end
+
+static void TestHamburgerMenuIsInPanelAndKeyboardDriven(void) {
+    [NSApplication sharedApplication];
+    MenuPanelSource *source = [[MenuPanelSource alloc] init];
+    source.rows = @[OutdatedRegistryRow(@"codex")];
+    source.commands = [NSMutableArray array];
+    source.settingChanges = [NSMutableArray array];
+    TickerPanelController *panel = [[TickerPanelController alloc] init];
+    panel.delegate = source;
+    [panel renderContentBitmap];
+
+    [panel menuPressed:nil];
+    NSView *menuView = [panel valueForKey:@"menuView"];
+    Assert(panel.menuVisible && !menuView.hidden, @"the hamburger should open the in-panel menu");
+    Assert(NSHeight(menuView.frame) > 4 * 22, @"the menu should size to its items");
+    Assert(NSContainsRect(panel.panel.contentView.bounds, menuView.frame), @"the menu should sit inside the panel");
+
+    [panel control:nil textView:nil doCommandBySelector:@selector(moveDown:)];
+    [panel control:nil textView:nil doCommandBySelector:@selector(insertNewline:)];
+    Assert([source.commands isEqualToArray:@[TickerCommandRefresh]], @"down + return should run the second item");
+    Assert(!panel.menuVisible && menuView.hidden, @"activating an item should close the menu");
+
+    [panel menuPressed:nil];
+    [panel control:nil textView:nil doCommandBySelector:@selector(moveUp:)];
+    [panel control:nil textView:nil doCommandBySelector:@selector(insertNewline:)];
+    Assert([source.commands.lastObject isEqualToString:TickerCommandQuit], @"up from the first item should wrap to the last");
+
+    [panel menuPressed:nil];
+    [panel control:nil textView:nil doCommandBySelector:@selector(cancelOperation:)];
+    Assert(!panel.menuVisible, @"esc should close the menu");
+    Assert(source.commands.count == 2, @"esc should not run anything");
+
+    [panel menuPressed:nil];
+    [panel control:nil textView:nil doCommandBySelector:@selector(moveDown:)];
+    [panel control:nil textView:nil doCommandBySelector:@selector(moveDown:)];
+    [panel control:nil textView:nil doCommandBySelector:@selector(insertNewline:)];
+    NSView *settingsView = [panel valueForKey:@"settingsView"];
+    Assert(panel.settingsVisible && !settingsView.hidden, @"Settings should open the inline settings view");
+    Assert(source.commands.count == 2, @"Settings is handled by the panel, not sent as a command");
+
+    [panel control:nil textView:nil doCommandBySelector:@selector(moveDown:)];
+    [panel control:nil textView:nil doCommandBySelector:@selector(moveRight:)];
+    [panel control:nil textView:nil doCommandBySelector:@selector(moveUp:)];
+    [panel control:nil textView:nil doCommandBySelector:@selector(moveLeft:)];
+    Assert([source.settingChanges isEqualToArray:@[@"refreshInterval=off", @"terminal=Ghostty"]], [NSString stringWithFormat:@"arrow keys should change settings: %@", source.settingChanges]);
+
+    [panel cancel];
+    Assert(!panel.settingsVisible && settingsView.hidden, @"esc should leave settings before closing the panel");
+}
+
+static void TestNoNativeMenuRemains(void) {
+    Assert(![MenuController instancesRespondToSelector:NSSelectorFromString(@"showClassicMenu")], @"the classic NSMenu should be gone");
+    Assert(![MenuController instancesRespondToSelector:NSSelectorFromString(@"rebuildMenu")], @"the classic NSMenu builder should be gone");
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        TestHamburgerMenuIsInPanelAndKeyboardDriven();
+        TestNoNativeMenuRemains();
         TestAgentNameHeuristic();
         TestDirectoryScansFindExecutablesOnly();
         TestCargoAndPipxParsing();

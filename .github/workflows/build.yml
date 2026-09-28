@@ -34,6 +34,8 @@ jobs:
         run: |
           make previews
           test -s build/previews/first-run-scan.png
+          test -s build/previews/hamburger-menu.png
+          test -s build/previews/settings-preview.png
       - name: Detect registry CLIs on the runner
         run: |
           build/CLITicker.app/Contents/MacOS/CLITicker --dump-registry build/previews --exercise-update npm

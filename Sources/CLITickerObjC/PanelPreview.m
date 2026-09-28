@@ -104,7 +104,24 @@
 - (NSDictionary *)tickerPanelSnapshot:(TickerPanelController *)panel {
     if (self.scanning) return [self scanningSnapshot];
     NSArray *registryRows = [self registryRows];
+    NSArray *menu = @[
+        @{@"command": TickerCommandUpdateAll, @"title": @"Update all", @"detail": @"9 updates", @"shortcut": @"⌘U", @"emphasis": @YES},
+        @{@"command": TickerCommandRefresh, @"title": @"Check for updates / rescan", @"detail": @"scanned 4m ago", @"shortcut": @"⌘R"},
+        @{@"command": TickerCommandUpdateApp, @"title": @"Version", @"detail": @"0.2.0 · update → 0.3.0", @"emphasis": @YES, @"separator": @YES},
+        @{@"command": TickerCommandSettings, @"title": @"Settings", @"shortcut": @"⌘,"},
+        @{@"command": TickerCommandMarkdownReport, @"title": @"Open report", @"detail": @"inventory.md", @"shortcut": @"⌘O", @"separator": @YES},
+        @{@"command": TickerCommandOpenGitHub, @"title": @"About", @"detail": @"github.com/Malgsx/cli-ticker"},
+        @{@"command": TickerCommandQuit, @"title": @"Quit", @"shortcut": @"⌘Q", @"separator": @YES}
+    ];
+    NSArray *settings = @[
+        @{@"id": @"terminal", @"label": @"Preferred terminal", @"options": @[@"Terminal", @"Ghostty", @"iTerm"], @"index": @1},
+        @{@"id": @"refreshInterval", @"label": @"Rescan every", @"options": @[@"5 min", @"15 min", @"30 min", @"1 hour", @"off"], @"index": @1},
+        @{@"id": @"launchAtLogin", @"label": @"Launch at login", @"options": @[@"off", @"on"], @"index": @1},
+        @{@"id": @"showAgents", @"label": @"Agents view", @"options": @[@"shown", @"hidden"], @"index": @0}
+    ];
     return @{
+        @"menu": menu,
+        @"settings": settings,
         @"views": @[
             @{@"id": @"clis", @"label": @"CLIs", @"symbol": @"square.stack.3d.up", @"rows": registryRows, @"columns": @[@"Name ·", @"Version", @"Via", @"Status"]},
             @{@"id": @"agents", @"label": @"Agents", @"symbol": @"sparkles", @"rows": @[], @"count": @7, @"columns": @[@"Name ·", @"Version", @"Via", @"Action"]},
@@ -219,10 +236,16 @@ BOOL RenderPanelPreviewsIfRequested(void) {
     BOOL menuBarOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"menubar-preview.png"], YES);
     panel.selectedViewId = @"clis";
     BOOL listOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"cli-list-preview.png"], NO);
+    [panel toggleMenu];
+    BOOL menuOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"hamburger-menu.png"], YES);
+    [panel showSettings];
+    BOOL settingsOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"settings-preview.png"], NO);
+    [panel hideSettings];
     source.scanning = YES;
     BOOL scanOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"first-run-scan.png"], YES);
 
-    fprintf(stderr, "menubar-preview: %s, cli-list-preview: %s, first-run-scan: %s\n", menuBarOK ? "ok" : "failed", listOK ? "ok" : "failed", scanOK ? "ok" : "failed");
-    exit(menuBarOK && listOK && scanOK ? 0 : 1);
+    fprintf(stderr, "menubar-preview: %s, cli-list-preview: %s, hamburger-menu: %s, settings-preview: %s, first-run-scan: %s\n",
+            menuBarOK ? "ok" : "failed", listOK ? "ok" : "failed", menuOK ? "ok" : "failed", settingsOK ? "ok" : "failed", scanOK ? "ok" : "failed");
+    exit(menuBarOK && listOK && menuOK && settingsOK && scanOK ? 0 : 1);
     return YES;
 }

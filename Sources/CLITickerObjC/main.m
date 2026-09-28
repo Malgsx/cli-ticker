@@ -11,6 +11,7 @@
 #import "CLIRegistry.h"
 #import "PanelPreview.h"
 #import "TickerPanel.h"
+#import <ServiceManagement/ServiceManagement.h>
 
 static NSString *const StatusCurrent = @"current";
 static NSString *const StatusOutdated = @"outdated";
@@ -480,16 +481,6 @@ static NSString *ShellCommandForUpdateAction(NSDictionary *action) {
     return [words componentsJoinedByString:@" "];
 }
 
-static NSTextField *GlassLabel(NSString *text, NSRect frame, NSFont *font, NSColor *color, NSTextAlignment alignment) {
-    NSTextField *label = [NSTextField labelWithString:text ?: @""];
-    label.frame = frame;
-    label.font = font;
-    label.textColor = color;
-    label.alignment = alignment;
-    label.lineBreakMode = NSLineBreakByTruncatingTail;
-    return label;
-}
-
 static BOOL ApplicationInstalled(NSArray<NSString *> *appNames) {
     NSArray<NSString *> *roots = @[
         @"/Applications",
@@ -558,6 +549,29 @@ static NSString *AgentInvocationName(NSString *canonicalName) {
         };
     });
     return overrides[canonicalName] ?: canonicalName;
+}
+
+static NSArray<NSNumber *> *RefreshIntervalMinutes(void) { return @[@5, @15, @30, @60, @0]; }
+
+static NSString *RefreshIntervalLabel(NSInteger minutes) {
+    if (minutes <= 0) return @"off";
+    return minutes >= 60 ? [NSString stringWithFormat:@"%ld hour%@", (long)(minutes / 60), minutes >= 120 ? @"s" : @""] : [NSString stringWithFormat:@"%ld min", (long)minutes];
+}
+
+// The app's own GitHub repo, used for its update check and the About link. Forks set it
+// through the Makefile's REPO (CLITickerRepository in Info.plist).
+static NSString *AppRepository(void) {
+    NSString *repo = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CLITickerRepository"];
+    return [repo isKindOfClass:[NSString class]] && repo.length > 0 ? repo : @"Malgsx/cli-ticker";
+}
+
+static NSString *AppVersion(void) {
+    NSString *version = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    return [version isKindOfClass:[NSString class]] ? version : @"dev";
+}
+
+static NSString *SelfUpdateCommand(NSString *repo) {
+    return [NSString stringWithFormat:@"curl -fsSL https://raw.githubusercontent.com/%@/main/install.sh | CLI_TICKER_REPO=%@ bash", repo, repo];
 }
 
 static NSString *const SourceLocalBin = @"~/.local/bin";
@@ -936,14 +950,10 @@ static NSArray<NSMutableDictionary *> *WithoutPathDuplicates(NSArray<NSMutableDi
 @property NSArray<NSDictionary *> *recentChanges;
 @property (assign) FSEventStreamRef installWatchStream;
 @property NSTimer *watcherRefreshTimer;
-@property NSArray<NSDictionary *> *allUpdateItems;
-@property NSTableView *allUpdatesTableView;
-@property NSAlert *allUpdatesAlert;
-@property NSArray<NSDictionary *> *searchResultItems;
-@property NSTableView *searchResultsTableView;
+@property NSTimer *refreshTimer;
+@property NSString *latestAppVersion;
 @property TickerPanelController *panel;
 @property CLIRegistryService *registry;
-@property NSMenu *classicMenu;
 // YES from a first launch (no saved inventory) until the first scan and version check finish.
 @property BOOL firstRunScanning;
 @property BOOL completedFirstScan;
@@ -1009,7 +1019,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     [self loadReport];
     [self loadRecentChanges];
     [self setUpPanel];
-    [self rebuildMenu];
+    [self reloadPanel];
     [self refresh:nil];
     [self startInstallWatcher];
     if (self.firstRunScanning && ![self launchedForAutomation]) {
@@ -1019,13 +1029,145 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         });
     }
 
-    [NSTimer scheduledTimerWithTimeInterval:15 * 60 target:self selector:@selector(refresh:) userInfo:nil repeats:YES];
+    [self scheduleRefreshTimer];
+    [self checkForAppUpdate:nil];
+    [NSTimer scheduledTimerWithTimeInterval:6 * 60 * 60 target:self selector:@selector(checkForAppUpdate:) userInfo:nil repeats:YES];
     [NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(checkForUpdateRefreshRequest:) userInfo:nil repeats:YES];
     return self;
 }
 
 - (void)dealloc {
     [self stopInstallWatcher];
+}
+
+#pragma mark - Settings
+
+- (NSInteger)refreshIntervalMinutes {
+    id saved = [[NSUserDefaults standardUserDefaults] objectForKey:@"RefreshIntervalMinutes"];
+    return saved ? [saved integerValue] : 15;
+}
+
+- (void)scheduleRefreshTimer {
+    [self.refreshTimer invalidate];
+    self.refreshTimer = nil;
+    NSInteger minutes = [self refreshIntervalMinutes];
+    if (minutes > 0) self.refreshTimer = [NSTimer scheduledTimerWithTimeInterval:minutes * 60 target:self selector:@selector(refresh:) userInfo:nil repeats:YES];
+}
+
+- (BOOL)showsAgents {
+    id saved = [[NSUserDefaults standardUserDefaults] objectForKey:@"ShowAgents"];
+    return saved ? [saved boolValue] : YES;
+}
+
+// nil when launch at login is unavailable (macOS 12, or no SMAppService).
+- (NSNumber *)launchesAtLogin {
+    if (@available(macOS 13.0, *)) {
+        SMAppServiceStatus status = [SMAppService mainAppService].status;
+        return @(status == SMAppServiceStatusEnabled || status == SMAppServiceStatusRequiresApproval);
+    }
+    return nil;
+}
+
+- (void)setLaunchesAtLogin:(BOOL)enabled {
+    if (@available(macOS 13.0, *)) {
+        NSError *error = nil;
+        BOOL ok = enabled ? [[SMAppService mainAppService] registerAndReturnError:&error] : [[SMAppService mainAppService] unregisterAndReturnError:&error];
+        if (!ok) NSLog(@"Launch at login %@ failed: %@", enabled ? @"enable" : @"disable", error.localizedDescription);
+        if (enabled && [SMAppService mainAppService].status == SMAppServiceStatusRequiresApproval) [SMAppService openSystemSettingsLoginItems];
+    }
+}
+
+- (NSArray<NSDictionary *> *)panelSettings {
+    NSArray *terminals = [self availableTerminals];
+    NSUInteger terminalIndex = [terminals indexOfObject:self.preferredTerminal];
+    NSMutableArray *intervalLabels = [NSMutableArray array];
+    for (NSNumber *minutes in RefreshIntervalMinutes()) [intervalLabels addObject:RefreshIntervalLabel(minutes.integerValue)];
+    NSUInteger intervalIndex = [RefreshIntervalMinutes() indexOfObject:@([self refreshIntervalMinutes])];
+    NSNumber *login = [self launchesAtLogin];
+    return @[
+        @{@"id": @"terminal", @"label": @"Preferred terminal", @"options": terminals, @"index": @(terminalIndex == NSNotFound ? 0 : terminalIndex)},
+        @{@"id": @"refreshInterval", @"label": @"Rescan every", @"options": intervalLabels, @"index": @(intervalIndex == NSNotFound ? 1 : intervalIndex)},
+        @{@"id": @"launchAtLogin", @"label": @"Launch at login", @"options": login ? @[@"off", @"on"] : @[@"unavailable"], @"index": @(login.boolValue ? 1 : 0)},
+        @{@"id": @"showAgents", @"label": @"Agents view", @"options": @[@"shown", @"hidden"], @"index": @([self showsAgents] ? 0 : 1)}
+    ];
+}
+
+- (void)tickerPanel:(TickerPanelController *)panel changeSetting:(NSString *)settingId toOption:(NSString *)option {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if ([settingId isEqualToString:@"terminal"]) {
+        [self tickerPanel:panel selectTerminal:option];
+    } else if ([settingId isEqualToString:@"refreshInterval"]) {
+        for (NSNumber *minutes in RefreshIntervalMinutes()) {
+            if ([RefreshIntervalLabel(minutes.integerValue) isEqualToString:option]) [defaults setInteger:minutes.integerValue forKey:@"RefreshIntervalMinutes"];
+        }
+        [self scheduleRefreshTimer];
+    } else if ([settingId isEqualToString:@"launchAtLogin"]) {
+        [self setLaunchesAtLogin:[option isEqualToString:@"on"]];
+    } else if ([settingId isEqualToString:@"showAgents"]) {
+        [defaults setBool:[option isEqualToString:@"shown"] forKey:@"ShowAgents"];
+        if (![self showsAgents] && [panel.selectedViewId isEqualToString:@"agents"]) panel.selectedViewId = @"clis";
+    }
+}
+
+#pragma mark - App updates
+
+// Asks GitHub for the app's latest release tag; anonymous, no identifiers sent.
+- (void)checkForAppUpdate:(id)sender {
+    NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"https://api.github.com/repos/%@/releases/latest", AppRepository()]];
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:10];
+    [request setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+    [request setValue:@"CLITicker" forHTTPHeaderField:@"User-Agent"];
+    __weak typeof(self) weakSelf = self;
+    [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (!data || [(NSHTTPURLResponse *)response statusCode] != 200) return;
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        NSString *tag = [json isKindOfClass:[NSDictionary class]] && [json[@"tag_name"] isKindOfClass:[NSString class]] ? json[@"tag_name"] : nil;
+        NSString *latest = [CLIRegistryService versionFromOutput:tag pattern:nil];
+        if (!latest) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            weakSelf.latestAppVersion = latest;
+            [weakSelf reloadPanel];
+        });
+    }] resume];
+}
+
+- (BOOL)appUpdateAvailable {
+    return self.latestAppVersion && [CLIRegistryService compareVersion:AppVersion() toVersion:self.latestAppVersion] == NSOrderedAscending;
+}
+
+- (void)updateApp {
+    if (![self appUpdateAvailable]) {
+        [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:[NSString stringWithFormat:@"https://github.com/%@/releases", AppRepository()]]];
+        return;
+    }
+    // install.sh quits this copy, installs the latest release, and reopens it.
+    NSString *command = SelfUpdateCommand(AppRepository());
+    NSAlert *confirm = [[NSAlert alloc] init];
+    confirm.messageText = [NSString stringWithFormat:@"Update CLI to %@?", self.latestAppVersion];
+    confirm.informativeText = [NSString stringWithFormat:@"CLI will open %@ and run:\n\n%@", self.preferredTerminal, command];
+    [confirm addButtonWithTitle:@"Update"];
+    [confirm addButtonWithTitle:@"Cancel"];
+    [NSApp activateIgnoringOtherApps:YES];
+    if ([confirm runModal] != NSAlertFirstButtonReturn) return;
+    [self runInPreferredTerminal:[NSString stringWithFormat:@"printf '\\033]0;CLI - Update\\007'; %@", command]];
+}
+
+- (NSArray<NSDictionary *> *)panelMenuItems {
+    NSUInteger updates = [self supportedUpdateItemCount];
+    NSDate *scanned = [[NSFileManager defaultManager] attributesOfItemAtPath:self.reportURL.path error:nil].fileModificationDate;
+    NSString *scanDetail = self.refreshing ? @"scanning…" : (scanned ? [NSString stringWithFormat:@"scanned %@", [self relativeTimeForTimestamp:scanned.timeIntervalSince1970]] : @"");
+    NSString *versionDetail = [self appUpdateAvailable]
+        ? [NSString stringWithFormat:@"%@ · update → %@", AppVersion(), self.latestAppVersion]
+        : (self.latestAppVersion ? [NSString stringWithFormat:@"%@ · latest", AppVersion()] : AppVersion());
+    return @[
+        @{@"command": TickerCommandUpdateAll, @"title": @"Update all", @"detail": [NSString stringWithFormat:@"%lu %@", (unsigned long)updates, updates == 1 ? @"update" : @"updates"], @"shortcut": @"⌘U", @"emphasis": @(updates > 0)},
+        @{@"command": TickerCommandRefresh, @"title": @"Check for updates / rescan", @"detail": scanDetail, @"shortcut": @"⌘R"},
+        @{@"command": TickerCommandUpdateApp, @"title": @"Version", @"detail": versionDetail, @"emphasis": @([self appUpdateAvailable]), @"separator": @YES},
+        @{@"command": TickerCommandSettings, @"title": @"Settings", @"shortcut": @"⌘,"},
+        @{@"command": TickerCommandMarkdownReport, @"title": @"Open report", @"detail": @"inventory.md", @"shortcut": @"⌘O", @"separator": @YES},
+        @{@"command": TickerCommandOpenGitHub, @"title": @"About", @"detail": [@"github.com/" stringByAppendingString:AppRepository()]},
+        @{@"command": TickerCommandQuit, @"title": @"Quit", @"shortcut": @"⌘Q", @"separator": @YES}
+    ];
 }
 
 - (BOOL)launchedForAutomation {
@@ -1145,20 +1287,6 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     if (elapsed < 60 * 60) return [NSString stringWithFormat:@"%.0fm ago", elapsed / 60];
     if (elapsed < 24 * 60 * 60) return [NSString stringWithFormat:@"%.0fh ago", elapsed / (60 * 60)];
     return [NSString stringWithFormat:@"%.0fd ago", elapsed / (24 * 60 * 60)];
-}
-
-- (NSString *)recentChangeTitle:(NSDictionary *)change {
-    NSDictionary *itemStub = @{@"name": change[@"name"] ?: @""};
-    NSString *label = [self titleNameForItem:itemStub];
-    NSString *when = [self relativeTimeForTimestamp:[change[@"date"] doubleValue]];
-
-    NSString *previousVersion = change[@"previousVersion"];
-    NSString *currentVersion = change[@"currentVersion"];
-    if ([change[@"kind"] isEqualToString:ChangeKindUpdated] && previousVersion.length > 0 && currentVersion.length > 0) {
-        return [NSString stringWithFormat:@"%@  %@ → %@  · updated %@", label, previousVersion, currentVersion, when];
-    }
-    NSString *version = currentVersion.length > 0 ? currentVersion : @"installed";
-    return [NSString stringWithFormat:@"%@  %@  · installed %@", label, version, when];
 }
 
 - (NSDictionary *)inventoryItemForChange:(NSDictionary *)change {
@@ -1338,28 +1466,6 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     return count;
 }
 
-- (NSString *)summaryTitle {
-    if (self.items.count == 0) return @"No scan yet";
-    return [NSString stringWithFormat:@"%lu CLIs scanned, %lu outdated, %lu unknown",
-        self.items.count, [self countWithStatus:StatusOutdated], [self countWithStatus:StatusUnknown]];
-}
-
-- (NSString *)friendlyUpdateTitle:(NSDictionary *)item {
-    NSString *name = [self titleNameForItem:item];
-    if (name.length == 0) name = @"Unknown CLI";
-    NSString *source = item[@"source"] ?: @"";
-    NSString *current = item[@"currentVersion"] ?: @"installed";
-    NSString *latest = item[@"latestVersion"];
-
-    if ([item[@"status"] isEqualToString:StatusOutdated] && latest.length > 0) {
-        return [NSString stringWithFormat:@"%@  %@ → %@  (%@)", name, current, latest, source];
-    }
-    if ([item[@"status"] isEqualToString:StatusCurrent]) {
-        return [NSString stringWithFormat:@"%@  %@  (%@)", name, current, source];
-    }
-    return [NSString stringWithFormat:@"%@  installed  (%@)", name, source];
-}
-
 - (NSArray<NSDictionary *> *)searchItemsMatching:(NSString *)query limit:(NSUInteger)limit {
     NSString *trimmed = [query stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (trimmed.length == 0) return @[];
@@ -1438,56 +1544,6 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     return 0;
 }
 
-- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
-    if (tableView == self.searchResultsTableView) return self.searchResultItems.count;
-    return self.allUpdateItems.count;
-}
-
-- (id)tableView:(NSTableView *)tableView objectValueForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
-    NSArray<NSDictionary *> *items = tableView == self.searchResultsTableView ? self.searchResultItems : self.allUpdateItems;
-    if (row < 0 || row >= (NSInteger)items.count) return @"";
-    NSDictionary *item = items[row];
-    NSString *identifier = tableColumn.identifier;
-
-    if ([identifier isEqualToString:@"tool"]) return [self titleNameForItem:item];
-    if ([identifier isEqualToString:@"version"]) return [self versionSummaryForItem:item];
-    if ([identifier isEqualToString:@"current"]) return item[@"currentVersion"] ?: @"installed";
-    if ([identifier isEqualToString:@"latest"]) return item[@"latestVersion"] ?: @"";
-    if ([identifier isEqualToString:@"source"]) return item[@"source"] ?: @"";
-    if ([identifier isEqualToString:@"command"]) {
-        if (tableView == self.searchResultsTableView) return [self invocationForCLIItem:item];
-        return [self updateCommandForItem:item] ?: @"Manual update required";
-    }
-    return @"";
-}
-
-// Builds a scrollable single-selection table backed by this controller's data source.
-// `columns` holds @[identifier, title, width] triples.
-- (NSScrollView *)resultsScrollViewWithSize:(NSSize)size rowHeight:(CGFloat)rowHeight doubleAction:(SEL)doubleAction columns:(NSArray<NSArray *> *)columns {
-    NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, size.width, size.height)];
-    scrollView.hasVerticalScroller = YES;
-    scrollView.hasHorizontalScroller = YES;
-    scrollView.borderType = NSBezelBorder;
-
-    NSTableView *tableView = [[NSTableView alloc] initWithFrame:scrollView.contentView.bounds];
-    tableView.usesAlternatingRowBackgroundColors = YES;
-    tableView.allowsMultipleSelection = NO;
-    tableView.rowHeight = rowHeight;
-    tableView.target = self;
-    tableView.doubleAction = doubleAction;
-    tableView.dataSource = (id<NSTableViewDataSource>)self;
-    tableView.delegate = (id<NSTableViewDelegate>)self;
-    for (NSArray *spec in columns) {
-        NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:spec[0]];
-        column.title = spec[1];
-        column.width = [spec[2] doubleValue];
-        column.minWidth = column.width;
-        [tableView addTableColumn:column];
-    }
-    scrollView.documentView = tableView;
-    return scrollView;
-}
-
 - (void)runUpdateForItem:(NSDictionary *)item confirm:(BOOL)confirm {
     NSString *command = [self updateCommandForItem:item];
     if (command.length == 0) {
@@ -1508,18 +1564,6 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 
     NSString *terminalCommand = [self updateTerminalCommandForItem:item];
     [self runInPreferredTerminal:terminalCommand];
-}
-
-- (void)reloadAllUpdatesDialog {
-    if (!self.allUpdatesTableView) return;
-
-    NSArray<NSDictionary *> *updates = [self notableUpdateItems:NSUIntegerMax];
-    self.allUpdateItems = updates;
-    [self.allUpdatesTableView reloadData];
-    self.allUpdatesAlert.messageText = [NSString stringWithFormat:@"All Updates Available (%lu)", updates.count];
-    self.allUpdatesAlert.informativeText = updates.count > 0
-        ? [NSString stringWithFormat:@"Double-click an update to run it in %@.", self.preferredTerminal]
-        : @"All visible updates are current.";
 }
 
 - (NSString *)updateCommandForItem:(NSDictionary *)item {
@@ -1705,21 +1749,6 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     }];
 }
 
-- (NSString *)agentRowTitle:(NSDictionary *)item {
-    NSString *label = [self friendlyAgentName:[self displayNameForItem:item]];
-    return [NSString stringWithFormat:@"%@  %@", label, [self versionSummaryForItem:item]];
-}
-
-- (NSMenuItem *)agentMenuItemForItem:(NSDictionary *)item {
-    NSString *canonicalName = [self displayNameForItem:item];
-    NSMenuItem *row = [[NSMenuItem alloc] initWithTitle:[self agentRowTitle:item] action:@selector(openAgentTool:) keyEquivalent:@""];
-    row.target = self;
-    row.representedObject = item;
-    row.toolTip = item[@"path"];
-    row.image = AgentIcon(canonicalName);
-    return row;
-}
-
 - (NSString *)commandForAgentItem:(NSDictionary *)item {
     NSString *canonicalName = [self displayNameForItem:item];
     NSString *path = item[@"path"];
@@ -1827,63 +1856,6 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     RunCommand(@"/usr/bin/osascript", @[@"-e", script]);
 }
 
-- (NSMenuItem *)summaryMenuItem {
-#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
-    if (@available(macOS 26.0, *)) {
-        NSUInteger outdated = [self countWithStatus:StatusOutdated];
-
-        NSRect frame = NSMakeRect(0, 0, 330, 82);
-        NSGlassEffectView *glass = [[NSGlassEffectView alloc] initWithFrame:frame];
-        glass.style = NSGlassEffectViewStyleRegular;
-        glass.cornerRadius = 18;
-        glass.tintColor = [NSColor colorWithCalibratedRed:0.06 green:0.12 blue:0.28 alpha:0.34];
-        glass.wantsLayer = YES;
-        glass.layer.borderWidth = 1.0;
-        glass.layer.borderColor = [[NSColor colorWithCalibratedWhite:1.0 alpha:0.18] CGColor];
-        glass.layer.shadowColor = [[NSColor blackColor] CGColor];
-        glass.layer.shadowOpacity = 0.22;
-        glass.layer.shadowRadius = 14.0;
-        glass.layer.shadowOffset = NSMakeSize(0, -5);
-
-        NSView *content = [[NSView alloc] initWithFrame:frame];
-        content.wantsLayer = YES;
-        content.layer.cornerRadius = 18;
-        content.layer.masksToBounds = YES;
-        content.layer.backgroundColor = [[NSColor colorWithCalibratedRed:0.03 green:0.07 blue:0.16 alpha:0.24] CGColor];
-        glass.contentView = content;
-
-        NSView *topSheen = [[NSView alloc] initWithFrame:NSMakeRect(1, 40, 328, 41)];
-        topSheen.wantsLayer = YES;
-        topSheen.layer.backgroundColor = [[NSColor colorWithCalibratedWhite:1.0 alpha:0.09] CGColor];
-        topSheen.layer.cornerRadius = 17;
-        [content addSubview:topSheen];
-
-        NSView *bottomDepth = [[NSView alloc] initWithFrame:NSMakeRect(1, 1, 328, 31)];
-        bottomDepth.wantsLayer = YES;
-        bottomDepth.layer.backgroundColor = [[NSColor colorWithCalibratedRed:0.0 green:0.02 blue:0.07 alpha:0.12] CGColor];
-        bottomDepth.layer.cornerRadius = 17;
-        [content addSubview:bottomDepth];
-
-        NSString *state = self.refreshing ? @"Refreshing inventory…" : @"Local CLI inventory";
-        NSColor *primaryText = [NSColor colorWithCalibratedWhite:0.96 alpha:1.0];
-        NSColor *secondaryText = [NSColor colorWithCalibratedWhite:0.76 alpha:1.0];
-        [content addSubview:GlassLabel(@"CLI", NSMakeRect(18, 49, 185, 22), [NSFont boldSystemFontOfSize:17], primaryText, NSTextAlignmentLeft)];
-        [content addSubview:GlassLabel(state, NSMakeRect(18, 30, 185, 18), [NSFont systemFontOfSize:12 weight:NSFontWeightMedium], secondaryText, NSTextAlignmentLeft)];
-        [content addSubview:GlassLabel([NSString stringWithFormat:@"%lu CLIs", self.items.count], NSMakeRect(218, 51, 92, 16), [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightSemibold], primaryText, NSTextAlignmentRight)];
-        NSColor *updateText = outdated > 0 ? [NSColor colorWithCalibratedRed:1.0 green:0.58 blue:0.20 alpha:1.0] : secondaryText;
-        [content addSubview:GlassLabel([NSString stringWithFormat:@"%lu updates", outdated], NSMakeRect(218, 32, 92, 16), [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular], updateText, NSTextAlignmentRight)];
-
-        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:@"" action:nil keyEquivalent:@""];
-        item.view = glass;
-        return item;
-    }
-#endif
-
-    NSMenuItem *summary = [[NSMenuItem alloc] initWithTitle:[self summaryTitle] action:nil keyEquivalent:@""];
-    summary.enabled = NO;
-    return summary;
-}
-
 - (NSArray<NSDictionary *> *)notableUpdateItems:(NSUInteger)limit {
     NSMutableArray *updates = [NSMutableArray array];
     for (NSDictionary *item in self.items) {
@@ -1894,186 +1866,11 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     return updates;
 }
 
-- (NSMenuItem *)notableUpdateMenuItemForItem:(NSDictionary *)item {
-    NSMenuItem *row = [[NSMenuItem alloc] initWithTitle:[self friendlyUpdateTitle:item] action:@selector(applyUpdate:) keyEquivalent:@""];
-    row.target = self;
-    row.representedObject = item;
-    row.toolTip = item[@"path"];
-    row.image = [NSImage imageWithSystemSymbolName:@"arrow.triangle.2.circlepath" accessibilityDescription:@"Update available"];
-    return row;
-}
-
-- (NSMenuItem *)recentChangeMenuItemForChange:(NSDictionary *)change {
-    NSMenuItem *row = [[NSMenuItem alloc] initWithTitle:[self recentChangeTitle:change] action:@selector(openRecentChange:) keyEquivalent:@""];
-    NSDictionary *item = [self inventoryItemForChange:change];
-    row.target = item ? self : nil;
-    row.enabled = item != nil;
-    row.representedObject = item;
-    row.toolTip = item[@"path"];
-    row.image = [NSImage imageWithSystemSymbolName:@"checkmark.circle" accessibilityDescription:@"Recently updated"];
-    return row;
-}
-
-- (NSMenuItem *)terminalPreferenceMenuItem {
-    NSMenuItem *folder = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Preferred Terminal: %@", self.preferredTerminal] action:nil keyEquivalent:@""];
-    folder.image = [NSImage imageWithSystemSymbolName:@"terminal" accessibilityDescription:@"Preferred Terminal"];
-    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Preferred Terminal"];
-
-    for (NSString *terminal in [self availableTerminals]) {
-        NSString *title = [terminal isEqualToString:self.preferredTerminal] ? [NSString stringWithFormat:@"%@ selected", terminal] : terminal;
-        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:@selector(selectTerminal:) keyEquivalent:@""];
-        item.target = self;
-        item.representedObject = terminal;
-        item.state = [terminal isEqualToString:self.preferredTerminal] ? NSControlStateValueOn : NSControlStateValueOff;
-        [menu addItem:item];
-    }
-
-    folder.submenu = menu;
-    return folder;
-}
-
-- (NSMenuItem *)reportMenuItem {
-    NSMenuItem *folder = [[NSMenuItem alloc] initWithTitle:@"Open Report" action:nil keyEquivalent:@""];
-    folder.image = [NSImage imageWithSystemSymbolName:@"doc.text" accessibilityDescription:@"Open Report"];
-    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Open Report"];
-
-    NSMenuItem *json = [[NSMenuItem alloc] initWithTitle:@"JSON Report" action:@selector(openJSONReport:) keyEquivalent:@"j"];
-    json.target = self;
-    json.image = [NSImage imageWithSystemSymbolName:@"curlybraces" accessibilityDescription:@"JSON Report"];
-    [menu addItem:json];
-
-    NSMenuItem *markdown = [[NSMenuItem alloc] initWithTitle:@"Markdown Report" action:@selector(openMarkdownReport:) keyEquivalent:@"m"];
-    markdown.target = self;
-    markdown.image = [NSImage imageWithSystemSymbolName:@"doc.plaintext" accessibilityDescription:@"Markdown Report"];
-    [menu addItem:markdown];
-
-    [menu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *note = [[NSMenuItem alloc] initWithTitle:@"Markdown is generated from the latest scan" action:nil keyEquivalent:@""];
-    note.enabled = NO;
-    [menu addItem:note];
-
-    folder.submenu = menu;
-    return folder;
-}
-
-- (void)rebuildMenu {
-    NSMenu *menu = [[NSMenu alloc] init];
-    [menu addItem:[self summaryMenuItem]];
-    [menu addItem:[NSMenuItem separatorItem]];
-
-    NSArray *agents = [self agentTools];
-    if (agents.count > 0) {
-        NSMenuItem *agentFolder = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Agent Tools  %lu", agents.count] action:nil keyEquivalent:@""];
-        agentFolder.image = [NSImage imageWithSystemSymbolName:@"folder" accessibilityDescription:@"Agent Tools"];
-        NSMenu *agentMenu = [[NSMenu alloc] initWithTitle:@"Agent Tools"];
-        NSMenuItem *folderSummary = [[NSMenuItem alloc] initWithTitle:@"Installed agent CLIs" action:nil keyEquivalent:@""];
-        folderSummary.enabled = NO;
-        [agentMenu addItem:folderSummary];
-        [agentMenu addItem:[NSMenuItem separatorItem]];
-        for (NSDictionary *item in agents) {
-            [agentMenu addItem:[self agentMenuItemForItem:item]];
-        }
-        [agentMenu addItem:[NSMenuItem separatorItem]];
-        NSMenuItem *agentNote = [[NSMenuItem alloc] initWithTitle:@"Full details are saved in the JSON report" action:nil keyEquivalent:@""];
-        agentNote.enabled = NO;
-        [agentMenu addItem:agentNote];
-        agentFolder.submenu = agentMenu;
-        [menu addItem:agentFolder];
-        [menu addItem:[NSMenuItem separatorItem]];
-    }
-
-    NSArray *notableUpdates = [self notableUpdateItems:14];
-    if (notableUpdates.count > 0) {
-        NSUInteger totalUpdates = [self countWithStatus:StatusOutdated];
-        NSUInteger supportedUpdates = [self supportedUpdateItemCount];
-        NSUInteger manualUpdates = totalUpdates > supportedUpdates ? totalUpdates - supportedUpdates : 0;
-        NSMenuItem *updatesFolder = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Updates Available  %lu", totalUpdates] action:nil keyEquivalent:@""];
-        updatesFolder.image = [NSImage imageWithSystemSymbolName:@"arrow.down.circle" accessibilityDescription:@"Notable Updates"];
-        NSMenu *updatesMenu = [[NSMenu alloc] initWithTitle:@"Notable Updates"];
-        NSMenuItem *updatesSummary = [[NSMenuItem alloc] initWithTitle:@"Newest versions found" action:nil keyEquivalent:@""];
-        updatesSummary.enabled = NO;
-        [updatesMenu addItem:updatesSummary];
-        [updatesMenu addItem:[NSMenuItem separatorItem]];
-        NSMenuItem *updateAll = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Update %lu Supported %@…", supportedUpdates, supportedUpdates == 1 ? @"Tool" : @"Tools"] action:@selector(updateAll:) keyEquivalent:@"u"];
-        updateAll.target = self;
-        updateAll.enabled = supportedUpdates > 0;
-        updateAll.image = [NSImage imageWithSystemSymbolName:@"arrow.down.circle.fill" accessibilityDescription:@"Update All"];
-        [updatesMenu addItem:updateAll];
-        [updatesMenu addItem:[NSMenuItem separatorItem]];
-        for (NSDictionary *item in notableUpdates) {
-            [updatesMenu addItem:[self notableUpdateMenuItemForItem:item]];
-        }
-        [updatesMenu addItem:[NSMenuItem separatorItem]];
-        NSMenuItem *showAll = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Show All %lu Updates…", totalUpdates] action:@selector(showAllUpdates:) keyEquivalent:@""];
-        showAll.target = self;
-        showAll.image = [NSImage imageWithSystemSymbolName:@"list.bullet.rectangle" accessibilityDescription:@"Show All Updates"];
-        [updatesMenu addItem:showAll];
-        NSString *noteText;
-        if (manualUpdates > 0) {
-            noteText = manualUpdates == 1
-                ? @"1 tool needs a manual update"
-                : [NSString stringWithFormat:@"%lu tools need a manual update", manualUpdates];
-        } else if (totalUpdates > notableUpdates.count) {
-            noteText = [NSString stringWithFormat:@"Showing %lu of %lu updates", notableUpdates.count, totalUpdates];
-        } else {
-            noteText = @"Click an update to apply it";
-        }
-        NSMenuItem *updatesNote = [[NSMenuItem alloc] initWithTitle:noteText action:nil keyEquivalent:@""];
-        updatesNote.enabled = NO;
-        [updatesMenu addItem:updatesNote];
-        updatesFolder.submenu = updatesMenu;
-        [menu addItem:updatesFolder];
-        [menu addItem:[NSMenuItem separatorItem]];
-    }
-
-    NSArray *recentChanges = [self prunedChanges:self.recentChanges];
-    if (recentChanges.count > 0) {
-        NSMenuItem *recentFolder = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Recently Updated  %lu", recentChanges.count] action:nil keyEquivalent:@""];
-        recentFolder.image = [NSImage imageWithSystemSymbolName:@"clock.arrow.circlepath" accessibilityDescription:@"Recently Updated"];
-        NSMenu *recentMenu = [[NSMenu alloc] initWithTitle:@"Recently Updated"];
-        NSMenuItem *recentSummary = [[NSMenuItem alloc] initWithTitle:@"Installs and updates detected automatically" action:nil keyEquivalent:@""];
-        recentSummary.enabled = NO;
-        [recentMenu addItem:recentSummary];
-        [recentMenu addItem:[NSMenuItem separatorItem]];
-        for (NSDictionary *change in recentChanges) {
-            [recentMenu addItem:[self recentChangeMenuItemForChange:change]];
-        }
-        recentFolder.submenu = recentMenu;
-        [menu addItem:recentFolder];
-        [menu addItem:[NSMenuItem separatorItem]];
-    }
-
-    NSUInteger shown = agents.count + notableUpdates.count;
-    if (self.items.count > shown) {
-        NSMenuItem *overflow = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"%lu more saved in report", self.items.count - shown] action:nil keyEquivalent:@""];
-        overflow.enabled = NO;
-        [menu addItem:overflow];
-    }
-
-    [menu addItem:[NSMenuItem separatorItem]];
-    [menu addItem:[self terminalPreferenceMenuItem]];
-    NSMenuItem *search = [[NSMenuItem alloc] initWithTitle:@"Search CLIs" action:@selector(searchCLIs:) keyEquivalent:@"f"];
-    search.target = self;
-    search.image = [NSImage imageWithSystemSymbolName:@"magnifyingglass" accessibilityDescription:@"Search CLIs"];
-    [menu addItem:search];
-    NSMenuItem *refresh = [[NSMenuItem alloc] initWithTitle:self.refreshing ? @"Refreshing..." : @"Refresh Now" action:@selector(refresh:) keyEquivalent:@"r"];
-    refresh.target = self;
-    [menu addItem:refresh];
-    [menu addItem:[self reportMenuItem]];
-    [menu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *quit = [[NSMenuItem alloc] initWithTitle:@"Quit" action:@selector(quit:) keyEquivalent:@"q"];
-    quit.target = self;
-    [menu addItem:quit];
-
-    self.classicMenu = menu;
-    [self reloadPanel];
-}
-
 - (void)refresh:(id)sender {
     if (self.refreshing) return;
     self.refreshing = YES;
     [self.scanProgress removeAllObjects];
-    [self rebuildMenu];
+    [self reloadPanel];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSArray *fresh = [self.service refresh];
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -2084,8 +1881,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
             self.completedFirstScan = YES;
             [self.registry refreshWithInventory:fresh force:NO];
             [self updateFirstRunState];
-            [self rebuildMenu];
-            [self reloadAllUpdatesDialog];
+            [self reloadPanel];
         });
     });
 }
@@ -2099,154 +1895,6 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 
     self.lastHandledUpdateRefreshDate = modified;
     [self refresh:nil];
-}
-
-- (void)selectTerminal:(NSMenuItem *)sender {
-    NSString *terminal = sender.representedObject;
-    if (terminal.length == 0) return;
-    self.preferredTerminal = terminal;
-    [[NSUserDefaults standardUserDefaults] setObject:terminal forKey:@"PreferredTerminal"];
-    [self rebuildMenu];
-}
-
-- (void)openAgentTool:(NSMenuItem *)sender {
-    NSDictionary *item = sender.representedObject;
-    if (![item isKindOfClass:[NSDictionary class]]) return;
-    NSString *command = [self launchCommandForAgentItem:item];
-    [self runInPreferredTerminal:command];
-}
-
-- (void)openRecentChange:(NSMenuItem *)sender {
-    NSDictionary *item = sender.representedObject;
-    if (![item isKindOfClass:[NSDictionary class]]) return;
-    NSString *command = [self launchCommandForCLIItem:item];
-    [self runInPreferredTerminal:command];
-}
-
-- (NSDictionary *)selectedSearchResultFromTable:(NSTableView *)tableView {
-    NSInteger row = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow;
-    if (row < 0 || row >= (NSInteger)self.searchResultItems.count) return nil;
-    return self.searchResultItems[row];
-}
-
-- (void)openSelectedSearchResult:(NSTableView *)sender {
-    NSDictionary *item = [self selectedSearchResultFromTable:sender];
-    if (!item) return;
-
-    NSString *command = [self launchCommandForCLIItem:item];
-    [self runInPreferredTerminal:command];
-}
-
-- (void)copyLaunchScriptForSearchResult:(NSDictionary *)item {
-    if (!item) return;
-
-    NSString *script = [self invocationForCLIItem:item];
-    NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
-    [pasteboard clearContents];
-    [pasteboard setString:script forType:NSPasteboardTypeString];
-}
-
-- (void)searchCLIs:(id)sender {
-    NSAlert *prompt = [[NSAlert alloc] init];
-    prompt.messageText = @"Search CLIs";
-    prompt.informativeText = @"Search installed command names and sources.";
-    [prompt addButtonWithTitle:@"Search"];
-    [prompt addButtonWithTitle:@"Cancel"];
-
-    NSSearchField *field = [[NSSearchField alloc] initWithFrame:NSMakeRect(0, 0, 360, 26)];
-    field.placeholderString = @"codex, npm, homebrew...";
-    prompt.accessoryView = field;
-
-    NSModalResponse response = [prompt runModal];
-    if (response != NSAlertFirstButtonReturn) return;
-
-    NSString *query = field.stringValue ?: @"";
-    NSArray<NSDictionary *> *matches = [self searchItemsMatching:query limit:24];
-    if (matches.count == 0) {
-        ShowInfoAlert([NSString stringWithFormat:@"No CLIs Found for \"%@\"", query],
-                      @"Try searching by command name or package manager.",
-                      @"Done");
-        return;
-    }
-
-    self.searchResultItems = matches;
-
-    NSScrollView *scrollView = [self resultsScrollViewWithSize:NSMakeSize(540, 190)
-                                                     rowHeight:22
-                                                  doubleAction:@selector(openSelectedSearchResult:)
-                                                       columns:@[
-        @[@"tool", @"Tool", @130],
-        @[@"version", @"Version", @78],
-        @[@"source", @"Source", @100],
-        @[@"command", @"Command", @220]
-    ]];
-    NSTableView *tableView = scrollView.documentView;
-    self.searchResultsTableView = tableView;
-    [tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
-
-    NSAlert *results = [[NSAlert alloc] init];
-    results.messageText = [NSString stringWithFormat:@"Search Results for \"%@\"", query];
-    results.informativeText = [NSString stringWithFormat:@"Double-click a CLI to open it in %@, or copy its bash launch script.", self.preferredTerminal];
-    results.accessoryView = scrollView;
-    [results addButtonWithTitle:@"Done"];
-    [results addButtonWithTitle:@"Copy Bash Script"];
-    if ([results runModal] == NSAlertSecondButtonReturn) {
-        [self copyLaunchScriptForSearchResult:[self selectedSearchResultFromTable:tableView]];
-    }
-
-    self.searchResultsTableView = nil;
-    self.searchResultItems = nil;
-}
-
-- (void)showAllUpdates:(id)sender {
-    NSArray<NSDictionary *> *updates = [self notableUpdateItems:NSUIntegerMax];
-    if (updates.count == 0) return;
-    self.allUpdateItems = updates;
-
-    NSScrollView *scrollView = [self resultsScrollViewWithSize:NSMakeSize(760, 320)
-                                                     rowHeight:24
-                                                  doubleAction:@selector(updateSelectedFromAllUpdates:)
-                                                       columns:@[
-        @[@"tool", @"Tool", @150],
-        @[@"current", @"Current", @95],
-        @[@"latest", @"Latest", @95],
-        @[@"source", @"Source", @120],
-        @[@"command", @"Command", @285]
-    ]];
-    self.allUpdatesTableView = scrollView.documentView;
-
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = [NSString stringWithFormat:@"All Updates Available (%lu)", updates.count];
-    alert.informativeText = [NSString stringWithFormat:@"Double-click an update to run it in %@.", self.preferredTerminal];
-    alert.accessoryView = scrollView;
-    self.allUpdatesAlert = alert;
-    [alert addButtonWithTitle:@"Done"];
-    [alert addButtonWithTitle:@"Update Supported…"];
-    [alert addButtonWithTitle:@"Open Markdown Report"];
-    NSModalResponse response = [alert runModal];
-    self.allUpdatesAlert = nil;
-    self.allUpdatesTableView = nil;
-    self.allUpdateItems = nil;
-
-    if (response == NSAlertSecondButtonReturn) {
-        [self updateAll:nil];
-    } else if (response == NSAlertThirdButtonReturn) {
-        [self openMarkdownReport:nil];
-    }
-}
-
-- (void)updateSelectedFromAllUpdates:(NSTableView *)sender {
-    NSInteger row = sender.clickedRow >= 0 ? sender.clickedRow : sender.selectedRow;
-    if (row < 0 || row >= (NSInteger)self.allUpdateItems.count) return;
-
-    NSDictionary *item = self.allUpdateItems[row];
-    [self runUpdateForItem:item confirm:NO];
-}
-
-- (void)applyUpdate:(NSMenuItem *)sender {
-    NSDictionary *item = sender.representedObject;
-    if (![item isKindOfClass:[NSDictionary class]]) return;
-    [self runUpdateForItem:item confirm:YES];
 }
 
 - (void)openJSONReport:(id)sender {
@@ -2264,7 +1912,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 
 #pragma mark - Menu bar panel
 
-// Left click opens the panel; right click (or control-click) shows the classic menu.
+// Left click opens the panel; right click (or control-click) opens it with the menu showing.
 - (void)setUpPanel {
     self.panel = [[TickerPanelController alloc] init];
     self.panel.delegate = (id<TickerPanelDelegate>)self;
@@ -2300,17 +1948,10 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     NSEvent *event = NSApp.currentEvent;
     BOOL secondary = event.type == NSEventTypeRightMouseUp || (event.modifierFlags & NSEventModifierFlagControl);
     if (secondary) {
-        [self showClassicMenu];
+        [self.panel showMenuRelativeToStatusButton:sender];
         return;
     }
     [self.panel toggleRelativeToStatusButton:sender];
-}
-
-- (void)showClassicMenu {
-    [self.panel close];
-    self.statusItem.menu = self.classicMenu;
-    [self.statusItem.button performClick:nil];
-    self.statusItem.menu = nil;
 }
 
 - (void)reloadPanel {
@@ -2483,13 +2124,13 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     NSUInteger registryOutdated = 0;
     for (NSDictionary *row in registryRows) if ([row[@"state"] isEqualToString:@"outdated"]) registryOutdated++;
     NSArray *cliRows = scanning ? @[] : [registryRows arrayByAddingObjectsFromArray:[self panelOtherCLIRows]];
-    NSArray *views = @[
-        @{@"id": @"clis", @"label": @"CLIs", @"symbol": @"square.stack.3d.up", @"rows": cliRows, @"columns": @[@"Name ·", @"Version", @"Via", @"Status"]},
-        @{@"id": @"agents", @"label": @"Agents", @"symbol": @"sparkles", @"rows": [self panelAgentRows], @"columns": @[@"Name ·", @"Version", @"Via", @"Action"]},
+    NSMutableArray *views = [NSMutableArray arrayWithObject:@{@"id": @"clis", @"label": @"CLIs", @"symbol": @"square.stack.3d.up", @"rows": cliRows, @"columns": @[@"Name ·", @"Version", @"Via", @"Status"]}];
+    if ([self showsAgents]) [views addObject:@{@"id": @"agents", @"label": @"Agents", @"symbol": @"sparkles", @"rows": [self panelAgentRows], @"columns": @[@"Name ·", @"Version", @"Via", @"Action"]}];
+    [views addObjectsFromArray:@[
         @{@"id": @"updates", @"label": @"Updates", @"symbol": @"arrow.down.circle", @"rows": [self panelUpdateRows], @"count": @([self countWithStatus:StatusOutdated]), @"columns": @[@"Name ·", @"Version", @"Via", @"Action"]},
         @{@"id": @"recent", @"label": @"Recent", @"symbol": @"clock", @"rows": [self panelRecentRows], @"columns": @[@"Name ·", @"Change", @"Via", @"When"]},
         @{@"id": @"all", @"label": @"All", @"symbol": @"list.bullet", @"rows": [self panelAllRows], @"columns": @[@"Name ·", @"Version", @"Via", @"Status"]}
-    ];
+    ]];
     NSUInteger outdated = [self countWithStatus:StatusOutdated];
     NSUInteger unknown = [self countWithStatus:StatusUnknown];
     NSMutableDictionary *snapshot = [@{
@@ -2498,7 +2139,9 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         @"preferredTerminal": self.preferredTerminal ?: @"",
         @"sources": [self panelSourceCounts],
         @"stats": @{@"current": @(self.items.count - outdated - unknown), @"outdated": @(outdated), @"unknown": @(unknown), @"registryOutdated": @(registryOutdated)},
-        @"status": [self panelStatusLine]
+        @"status": [self panelStatusLine],
+        @"menu": [self panelMenuItems],
+        @"settings": [self panelSettings]
     } mutableCopy];
     if (scanning) snapshot[@"scanning"] = scanning;
     return snapshot;
@@ -2564,8 +2207,10 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         [self openJSONReport:nil];
     } else if ([command isEqualToString:TickerCommandMarkdownReport]) {
         [self openMarkdownReport:nil];
-    } else if ([command isEqualToString:TickerCommandClassicMenu]) {
-        [self showClassicMenu];
+    } else if ([command isEqualToString:TickerCommandUpdateApp]) {
+        [self updateApp];
+    } else if ([command isEqualToString:TickerCommandOpenGitHub]) {
+        [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:[@"https://github.com/" stringByAppendingString:AppRepository()]]];
     } else if ([command isEqualToString:TickerCommandQuit]) {
         [self quit:nil];
     }
@@ -2575,7 +2220,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     if (terminal.length == 0) return;
     self.preferredTerminal = terminal;
     [[NSUserDefaults standardUserDefaults] setObject:terminal forKey:@"PreferredTerminal"];
-    [self rebuildMenu];
+    [self reloadPanel];
 }
 
 @end
