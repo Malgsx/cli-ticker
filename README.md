@@ -91,7 +91,7 @@ To install CLI on the user's Mac, run these steps in order. Stop and report the 
    test -x ~/Applications/CLITicker.app/Contents/MacOS/CLITicker && pgrep -x CLITicker && echo ok
    ```
 
-Tell the user to look for the CLI icon in the menu bar and click it. To install without launching the app, set `CLI_TICKER_NO_LAUNCH=1` for the `bash` side of the pipe (`... | CLI_TICKER_NO_LAUNCH=1 bash`). To build from source instead, run the clone command in [Build from source / fork](#build-from-source--fork) from the user's current directory. It needs `xcode-select -p` to succeed first. Inside the clone, use `./cli <command>` for everything (`./cli help` lists them): `./cli install` puts the source build in `~/Applications` and launches it, `./cli test` runs the tests, and `./cli uninstall` removes the app and its data.
+Tell the user to look for the CLI icon in the menu bar and click it, or to run `CLI` in Terminal to open the panel. `CLI update` installs the latest published release and opens the app. `CLI reload` quits it and opens it again. `CLI version` prints the version and says when a newer release is out. To install without launching the app, set `CLI_TICKER_NO_LAUNCH=1` for the `bash` side of the pipe (`... | CLI_TICKER_NO_LAUNCH=1 bash`). To build from source instead, run the clone command in [Build from source / fork](#build-from-source--fork) from the user's current directory. It needs `xcode-select -p` to succeed first. Inside the clone, use `./cli <command>` for everything (`./cli help` lists them): `./cli install` puts the source build in `~/Applications` and launches it, `./cli test` runs the tests, and `./cli uninstall` removes the app and its data.
 
 ## More
 
