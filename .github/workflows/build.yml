@@ -18,6 +18,27 @@ jobs:
           bash Tests/cli-command.sh
       - name: Build app
         run: ./cli build
+      - name: Preferred terminal launch targets
+        run: |
+          out="$RUNNER_TEMP/terminal-launch.json"
+          build/CLITicker.app/Contents/MacOS/CLITicker --exercise-terminal-launch "$out" Ghostty Terminal iTerm Warp Alacritty
+          python3 - "$out" <<'PY'
+          import json, sys
+          cases = {c["preferred"]: c for c in json.load(open(sys.argv[1]))["cases"]}
+          ghostty, terminal = cases["Ghostty"], cases["Terminal"]
+          assert ghostty["bundleIdentifier"] == "com.mitchellh.ghostty", ghostty
+          assert "com.mitchellh.ghostty" in "\n".join(ghostty["arguments"]), ghostty["arguments"]
+          assert "com.mitchellh.ghostty" in " ".join(ghostty.get("directArguments") or []), ghostty
+          assert terminal["bundleIdentifier"] == "com.apple.Terminal", terminal
+          assert "com.apple.Terminal" in "\n".join(terminal["arguments"]), terminal["arguments"]
+          assert ghostty["bundleIdentifier"] != terminal["bundleIdentifier"]
+          expected = {"iTerm": "com.googlecode.iterm2", "Warp": "dev.warp.Warp-Stable", "Alacritty": "org.alacritty"}
+          for name, bundle in expected.items():
+              row = cases[name]
+              assert row["bundleIdentifier"] == bundle, row
+              assert bundle in "\n".join(row["arguments"]), row["arguments"]
+          print("launch targets", ghostty["bundleIdentifier"], "vs", terminal["bundleIdentifier"])
+          PY
       - name: Registry icons are build inputs
         run: |
           make -q build/CLITicker.app/Contents/MacOS/CLITicker
