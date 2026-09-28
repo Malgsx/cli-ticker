@@ -1,12 +1,21 @@
+# Override any of these on the command line, e.g. `make BUNDLE_ID=com.example.cli`.
+# Changing them does not trigger a rebuild; run `make clean` first.
 APP_NAME := CLITicker
+DISPLAY_NAME := CLI
+BUNDLE_ID := local.codex.cliticker
+VERSION := 0.1.1
+# Set to a "Developer ID Application: ..." identity (or "-" for ad-hoc) to sign the bundle.
+SIGN_IDENTITY :=
+CODESIGN_FLAGS := --options runtime --timestamp
 BUILD_DIR := build
 APP_DIR := $(BUILD_DIR)/$(APP_NAME).app
 BIN := $(APP_DIR)/Contents/MacOS/$(APP_NAME)
+TEST_BIN := $(BUILD_DIR)/tests/CLITickerTests
 ICON := Assets/AppIcon/CLITicker.icns
 SOURCES := $(wildcard Sources/CLITickerObjC/*.m)
 HEADERS := $(wildcard Sources/CLITickerObjC/*.h)
 
-.PHONY: all run previews dist clean
+.PHONY: all run test previews dist clean
 
 all: $(BIN)
 
@@ -30,21 +39,30 @@ $(BIN): $(SOURCES) $(HEADERS) $(ICON) Assets/CLIRegistry/registry.json
 	'<plist version="1.0">' \
 	'<dict>' \
 	'  <key>CFBundleExecutable</key><string>$(APP_NAME)</string>' \
-	'  <key>CFBundleIdentifier</key><string>local.codex.cliticker</string>' \
-	'  <key>CFBundleName</key><string>CLI</string>' \
+	'  <key>CFBundleIdentifier</key><string>$(BUNDLE_ID)</string>' \
+	'  <key>CFBundleName</key><string>$(DISPLAY_NAME)</string>' \
 	'  <key>CFBundlePackageType</key><string>APPL</string>' \
 	'  <key>CFBundleIconFile</key><string>CLITicker</string>' \
-	'  <key>CFBundleVersion</key><string>0.1.1</string>' \
-	'  <key>CFBundleShortVersionString</key><string>0.1.1</string>' \
+	'  <key>CFBundleVersion</key><string>$(VERSION)</string>' \
+	'  <key>CFBundleShortVersionString</key><string>$(VERSION)</string>' \
 	'  <key>LSUIElement</key><true/>' \
 	'</dict>' \
 	'</plist>' > "$(APP_DIR)/Contents/Info.plist"
+	if [ -n "$(SIGN_IDENTITY)" ]; then codesign --force $(CODESIGN_FLAGS) --sign "$(SIGN_IDENTITY)" "$(APP_DIR)"; fi
 
 run: all
 	open "$(APP_DIR)"
 
 previews: all
 	"$(BIN)" --render-previews "$(BUILD_DIR)/previews"
+
+# The test file #imports main.m, so link every other source alongside it.
+$(TEST_BIN): Tests/CLITickerTests.m $(SOURCES) $(HEADERS)
+	mkdir -p "$(dir $(TEST_BIN))"
+	clang -fobjc-arc -framework AppKit -framework Foundation -framework CoreServices "$<" $(filter-out %/main.m,$(SOURCES)) -o "$(TEST_BIN)"
+
+test: $(TEST_BIN)
+	"$(TEST_BIN)"
 
 dist: all
 	mkdir -p "$(BUILD_DIR)/dist"

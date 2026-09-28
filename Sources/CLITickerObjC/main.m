@@ -1,5 +1,13 @@
 #import <AppKit/AppKit.h>
 #import <CoreServices/CoreServices.h>
+#import <errno.h>
+#import <fcntl.h>
+#import <poll.h>
+#import <signal.h>
+#import <spawn.h>
+#import <string.h>
+#import <sys/wait.h>
+#import <unistd.h>
 #import "CLIRegistry.h"
 #import "PanelPreview.h"
 #import "TickerPanel.h"
@@ -15,31 +23,216 @@ static NSString *const ChangeKindUpdated = @"updated";
 static const NSTimeInterval RecentChangeLifetime = 24 * 60 * 60;
 static const NSUInteger RecentChangeCapacity = 20;
 
-static NSString *RunCommand(NSString *launchPath, NSArray<NSString *> *arguments) {
-    NSTask *task = [[NSTask alloc] init];
-    task.launchPath = launchPath;
-    task.arguments = arguments;
+@interface CommandResult : NSObject
+@property NSString *standardOutput;
+@property NSString *standardError;
+@property int terminationStatus;
+@property BOOL timedOut;
+@property NSString *launchError;
+@end
+
+@implementation CommandResult
+@end
+
+// After a timeout, how long the process group gets to exit on SIGTERM before SIGKILL.
+static const NSTimeInterval CommandTerminateGracePeriod = 2;
+// After the command exits, how long to keep reading while a background
+// descendant still holds its stdout or stderr open.
+static const NSTimeInterval CommandOutputDrainPeriod = 1;
+
+static NSTimeInterval MonotonicNow(void) {
+    return [NSProcessInfo processInfo].systemUptime;
+}
+
+static char **CStringArray(NSArray<NSString *> *strings) {
+    char **array = calloc(strings.count + 1, sizeof(char *));
+    for (NSUInteger i = 0; i < strings.count; i++) {
+        array[i] = strdup(strings[i].UTF8String ?: "");
+    }
+    return array;
+}
+
+static void FreeCStringArray(char **array) {
+    for (char **entry = array; *entry; entry++) free(*entry);
+    free(array);
+}
+
+static BOOL ReapChild(pid_t pid, int *status) {
+    pid_t reaped;
+    do {
+        reaped = waitpid(pid, status, WNOHANG);
+    } while (reaped == -1 && errno == EINTR);
+    return reaped == pid || (reaped == -1 && errno == ECHILD);
+}
+
+// Reads everything currently available from a non-blocking descriptor and
+// closes it at EOF or on error.
+static void DrainDescriptor(int *fd, NSMutableData *data) {
+    if (*fd < 0) return;
+    uint8_t buffer[16384];
+    while (YES) {
+        ssize_t count = read(*fd, buffer, sizeof(buffer));
+        if (count > 0) {
+            [data appendBytes:buffer length:(NSUInteger)count];
+            continue;
+        }
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0 && errno == EAGAIN) return;
+        close(*fd);
+        *fd = -1;
+        return;
+    }
+}
+
+static CommandResult *RunCommandWithTimeout(NSString *launchPath, NSArray<NSString *> *arguments, NSTimeInterval timeout) {
+    CommandResult *result = [[CommandResult alloc] init];
+    result.standardOutput = @"";
+    result.standardError = @"";
+    result.terminationStatus = -1;
+    if (launchPath.length == 0) {
+        result.launchError = @"No executable path";
+        return result;
+    }
+
     NSMutableDictionary *environment = [[[NSProcessInfo processInfo] environment] mutableCopy];
     environment[@"HOMEBREW_NO_AUTO_UPDATE"] = @"1";
     environment[@"HOMEBREW_NO_ANALYTICS"] = @"1";
     environment[@"HOMEBREW_NO_INSTALL_CLEANUP"] = @"1";
-    task.environment = environment;
+    NSMutableArray<NSString *> *environmentStrings = [NSMutableArray array];
+    [environment enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *value, __unused BOOL *stop) {
+        [environmentStrings addObject:[NSString stringWithFormat:@"%@=%@", key, value]];
+    }];
+    NSMutableArray<NSString *> *argumentStrings = [NSMutableArray arrayWithObject:launchPath];
+    [argumentStrings addObjectsFromArray:arguments ?: @[]];
 
-    NSPipe *stdoutPipe = [NSPipe pipe];
-    NSPipe *stderrPipe = [NSPipe pipe];
-    task.standardOutput = stdoutPipe;
-    task.standardError = stderrPipe;
-
-    @try {
-        [task launch];
-        [task waitUntilExit];
-    } @catch (NSException *exception) {
-        return @"";
+    int stdoutPipe[2];
+    int stderrPipe[2];
+    if (pipe(stdoutPipe) != 0) {
+        result.launchError = @(strerror(errno));
+        return result;
+    }
+    if (pipe(stderrPipe) != 0) {
+        result.launchError = @(strerror(errno));
+        close(stdoutPipe[0]);
+        close(stdoutPipe[1]);
+        return result;
     }
 
-    NSData *data = [[stdoutPipe fileHandleForReading] readDataToEndOfFile];
-    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    return text ?: @"";
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_adddup2(&actions, stdoutPipe[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, stderrPipe[1], STDERR_FILENO);
+
+    // The child leads its own process group so a timeout can signal every
+    // descendant, and inherits only stdin/stdout/stderr so pipes from
+    // concurrent commands cannot leak into it and delay their EOF.
+    posix_spawnattr_t attributes;
+    posix_spawnattr_init(&attributes);
+    posix_spawnattr_setflags(&attributes, (short)(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT));
+    posix_spawnattr_setpgroup(&attributes, 0);
+    sigset_t signals;
+    sigemptyset(&signals);
+    posix_spawnattr_setsigmask(&attributes, &signals);
+    sigaddset(&signals, SIGPIPE);
+    sigaddset(&signals, SIGHUP);
+    sigaddset(&signals, SIGINT);
+    sigaddset(&signals, SIGQUIT);
+    sigaddset(&signals, SIGTERM);
+    posix_spawnattr_setsigdefault(&attributes, &signals);
+
+    char **argv = CStringArray(argumentStrings);
+    char **envp = CStringArray(environmentStrings);
+    pid_t pid = 0;
+    int spawnError = posix_spawn(&pid, launchPath.fileSystemRepresentation, &actions, &attributes, argv, envp);
+    FreeCStringArray(argv);
+    FreeCStringArray(envp);
+    posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attributes);
+    close(stdoutPipe[1]);
+    close(stderrPipe[1]);
+
+    if (spawnError != 0) {
+        result.launchError = @(strerror(spawnError));
+        close(stdoutPipe[0]);
+        close(stderrPipe[0]);
+        return result;
+    }
+
+    int fds[2] = {stdoutPipe[0], stderrPipe[0]};
+    NSMutableData *outputs[2] = {[NSMutableData data], [NSMutableData data]};
+    for (int i = 0; i < 2; i++) {
+        int flags = fcntl(fds[i], F_GETFL);
+        if (flags != -1) fcntl(fds[i], F_SETFL, flags | O_NONBLOCK);
+    }
+
+    NSTimeInterval deadline = MonotonicNow() + timeout;
+    NSTimeInterval exitedAt = 0;
+    int status = 0;
+    BOOL exited = NO;
+    while (YES) {
+        if (!exited && ReapChild(pid, &status)) {
+            exited = YES;
+            exitedAt = MonotonicNow();
+        }
+        NSTimeInterval now = MonotonicNow();
+        if (exited && ((fds[0] < 0 && fds[1] < 0) || now - exitedAt >= CommandOutputDrainPeriod)) break;
+        if (!exited && now >= deadline) {
+            result.timedOut = YES;
+            break;
+        }
+
+        struct pollfd pollfds[2];
+        nfds_t pollCount = 0;
+        for (int i = 0; i < 2; i++) {
+            if (fds[i] < 0) continue;
+            pollfds[pollCount].fd = fds[i];
+            pollfds[pollCount].events = POLLIN;
+            pollfds[pollCount].revents = 0;
+            pollCount++;
+        }
+        if (poll(pollfds, pollCount, 20) > 0) {
+            for (int i = 0; i < 2; i++) DrainDescriptor(&fds[i], outputs[i]);
+        }
+    }
+
+    if (result.timedOut) {
+        kill(-pid, SIGTERM);
+        NSTimeInterval killAt = MonotonicNow() + CommandTerminateGracePeriod;
+        while (!(exited = ReapChild(pid, &status)) && MonotonicNow() < killAt) {
+            for (int i = 0; i < 2; i++) DrainDescriptor(&fds[i], outputs[i]);
+            usleep(20000);
+        }
+        // The group ID cannot be reused while any member is alive, so this
+        // only reaches descendants that outlived or ignored SIGTERM.
+        kill(-pid, SIGKILL);
+        if (!exited) {
+            while (waitpid(pid, &status, 0) == -1 && errno == EINTR) {}
+        }
+    }
+
+    for (int i = 0; i < 2; i++) {
+        DrainDescriptor(&fds[i], outputs[i]);
+        if (fds[i] >= 0) close(fds[i]);
+    }
+    result.standardOutput = [[NSString alloc] initWithData:outputs[0] encoding:NSUTF8StringEncoding] ?: @"";
+    result.standardError = [[NSString alloc] initWithData:outputs[1] encoding:NSUTF8StringEncoding] ?: @"";
+    if (WIFEXITED(status)) {
+        result.terminationStatus = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        result.terminationStatus = WTERMSIG(status);
+    }
+    return result;
+}
+
+static NSString *RunCommand(NSString *launchPath, NSArray<NSString *> *arguments) {
+    CommandResult *result = RunCommandWithTimeout(launchPath, arguments, 120);
+    if (result.timedOut) {
+        NSLog(@"Command timed out: %@", launchPath.lastPathComponent);
+    } else if (result.launchError.length > 0) {
+        NSLog(@"Command failed to launch: %@", launchPath.lastPathComponent);
+    }
+    return result.standardOutput;
 }
 
 static NSString *CommandPath(NSString *name) {
@@ -214,6 +407,58 @@ static NSString *EscapedAppleScriptString(NSString *string) {
 
 static NSString *ShellSingleQuoteEscaped(NSString *string) {
     return [string stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
+}
+
+// Leaves plain words such as `brew`, `--cask` or `@scope/pkg@1.2` readable.
+// The safe set excludes `=`, `~` and glob characters because zsh expands them.
+static NSString *ShellQuotedArgument(NSString *argument) {
+    static NSCharacterSet *unsafeCharacters;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        unsafeCharacters = [[NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@+:,./_-"] invertedSet];
+    });
+    if (argument.length > 0 && [argument rangeOfCharacterFromSet:unsafeCharacters].location == NSNotFound) return argument;
+    return [NSString stringWithFormat:@"'%@'", ShellSingleQuoteEscaped(argument ?: @"")];
+}
+
+static NSDictionary *UpdateActionForItem(NSDictionary *item, NSString *displayName) {
+    NSString *source = item[@"source"] ?: @"";
+    NSString *name = item[@"name"] ?: @"";
+    if (name.length == 0) return nil;
+
+    // These fixed vendor installers intentionally require shell pipelines. No
+    // inventory-derived value is interpolated into either script.
+    if ([displayName isEqualToString:@"cora"]) {
+        return @{@"script": @"curl -fsSL https://cora.computer/install | bash"};
+    }
+    if ([displayName isEqualToString:@"antigravity"]) {
+        return @{@"script": @"curl -fsSL https://antigravity.google/cli/install.sh | bash"};
+    }
+    if ([source isEqualToString:@"Homebrew"]) {
+        return @{@"executable": @"brew", @"arguments": @[@"upgrade", name]};
+    }
+    if ([source isEqualToString:@"Homebrew Cask"]) {
+        return @{@"executable": @"brew", @"arguments": @[@"upgrade", @"--cask", name]};
+    }
+    if ([source isEqualToString:@"npm global"]) {
+        return @{@"executable": @"npm", @"arguments": @[@"install", @"-g", name]};
+    }
+    return nil;
+}
+
+static NSString *ShellCommandForUpdateAction(NSDictionary *action) {
+    NSString *script = action[@"script"];
+    if (script.length > 0) return script;
+
+    NSString *executable = action[@"executable"];
+    NSArray<NSString *> *arguments = action[@"arguments"];
+    if (executable.length == 0 || ![arguments isKindOfClass:[NSArray class]]) return nil;
+
+    NSMutableArray<NSString *> *words = [NSMutableArray arrayWithObject:ShellQuotedArgument(executable)];
+    for (NSString *argument in arguments) {
+        [words addObject:ShellQuotedArgument(argument)];
+    }
+    return [words componentsJoinedByString:@" "];
 }
 
 static NSTextField *GlassLabel(NSString *text, NSRect frame, NSFont *font, NSColor *color, NSTextAlignment alignment) {
@@ -1046,27 +1291,8 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 }
 
 - (NSString *)updateCommandForItem:(NSDictionary *)item {
-    NSString *source = item[@"source"] ?: @"";
-    NSString *name = item[@"name"] ?: @"";
     NSString *displayName = [self displayNameForItem:item];
-    if (name.length == 0) return nil;
-
-    if ([displayName isEqualToString:@"cora"]) {
-        return @"curl -fsSL https://cora.computer/install | bash";
-    }
-    if ([displayName isEqualToString:@"antigravity"]) {
-        return @"curl -fsSL https://antigravity.google/cli/install.sh | bash";
-    }
-    if ([source isEqualToString:@"Homebrew"]) {
-        return [NSString stringWithFormat:@"brew upgrade %@", name];
-    }
-    if ([source isEqualToString:@"Homebrew Cask"]) {
-        return [NSString stringWithFormat:@"brew upgrade --cask %@", name];
-    }
-    if ([source isEqualToString:@"npm global"]) {
-        return [NSString stringWithFormat:@"npm install -g %@", name];
-    }
-    return nil;
+    return ShellCommandForUpdateAction(UpdateActionForItem(item, displayName));
 }
 
 - (NSString *)updateTerminalCommandForItem:(NSDictionary *)item {
@@ -1113,19 +1339,30 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     return script;
 }
 
+// Outdated items that have an in-app update action. Several items can share
+// one command, so this can exceed allUpdateCommands.count.
+- (NSUInteger)supportedUpdateItemCount {
+    NSUInteger count = 0;
+    for (NSDictionary *item in [self notableUpdateItems:NSUIntegerMax]) {
+        if ([self updateCommandForItem:item].length > 0) count++;
+    }
+    return count;
+}
+
 - (void)updateAll:(id)sender {
     NSArray<NSString *> *commands = [self allUpdateCommands];
     if (commands.count == 0) {
-        ShowInfoAlert(@"No Updatable CLIs",
+        ShowInfoAlert(@"No Supported Updates",
                       @"None of the outdated tools support in-app updates. Use the package manager directly for these sources.",
                       @"OK");
         return;
     }
 
+    NSUInteger supportedUpdates = [self supportedUpdateItemCount];
     NSAlert *confirmAlert = [[NSAlert alloc] init];
-    confirmAlert.messageText = [NSString stringWithFormat:@"Update all %lu CLIs?", commands.count];
+    confirmAlert.messageText = [NSString stringWithFormat:@"Update %lu Supported %@?", supportedUpdates, supportedUpdates == 1 ? @"Tool" : @"Tools"];
     confirmAlert.informativeText = [NSString stringWithFormat:@"CLI will open %@ and run:\n\n%@", self.preferredTerminal, [commands componentsJoinedByString:@"\n"]];
-    [confirmAlert addButtonWithTitle:@"Update All"];
+    [confirmAlert addButtonWithTitle:@"Update"];
     [confirmAlert addButtonWithTitle:@"Cancel"];
     if ([confirmAlert runModal] != NSAlertFirstButtonReturn) return;
 
@@ -1497,6 +1734,8 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     NSArray *notableUpdates = [self notableUpdateItems:14];
     if (notableUpdates.count > 0) {
         NSUInteger totalUpdates = [self countWithStatus:StatusOutdated];
+        NSUInteger supportedUpdates = [self supportedUpdateItemCount];
+        NSUInteger manualUpdates = totalUpdates > supportedUpdates ? totalUpdates - supportedUpdates : 0;
         NSMenuItem *updatesFolder = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Updates Available  %lu", totalUpdates] action:nil keyEquivalent:@""];
         updatesFolder.image = [NSImage imageWithSystemSymbolName:@"arrow.down.circle" accessibilityDescription:@"Notable Updates"];
         NSMenu *updatesMenu = [[NSMenu alloc] initWithTitle:@"Notable Updates"];
@@ -1504,8 +1743,9 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         updatesSummary.enabled = NO;
         [updatesMenu addItem:updatesSummary];
         [updatesMenu addItem:[NSMenuItem separatorItem]];
-        NSMenuItem *updateAll = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Update All %lu…", totalUpdates] action:@selector(updateAll:) keyEquivalent:@"u"];
+        NSMenuItem *updateAll = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Update %lu Supported %@…", supportedUpdates, supportedUpdates == 1 ? @"Tool" : @"Tools"] action:@selector(updateAll:) keyEquivalent:@"u"];
         updateAll.target = self;
+        updateAll.enabled = supportedUpdates > 0;
         updateAll.image = [NSImage imageWithSystemSymbolName:@"arrow.down.circle.fill" accessibilityDescription:@"Update All"];
         [updatesMenu addItem:updateAll];
         [updatesMenu addItem:[NSMenuItem separatorItem]];
@@ -1517,9 +1757,16 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         showAll.target = self;
         showAll.image = [NSImage imageWithSystemSymbolName:@"list.bullet.rectangle" accessibilityDescription:@"Show All Updates"];
         [updatesMenu addItem:showAll];
-        NSString *noteText = totalUpdates > notableUpdates.count
-            ? [NSString stringWithFormat:@"Showing %lu of %lu updates", notableUpdates.count, totalUpdates]
-            : @"Click an update to apply it";
+        NSString *noteText;
+        if (manualUpdates > 0) {
+            noteText = manualUpdates == 1
+                ? @"1 tool needs a manual update"
+                : [NSString stringWithFormat:@"%lu tools need a manual update", manualUpdates];
+        } else if (totalUpdates > notableUpdates.count) {
+            noteText = [NSString stringWithFormat:@"Showing %lu of %lu updates", notableUpdates.count, totalUpdates];
+        } else {
+            noteText = @"Click an update to apply it";
+        }
         NSMenuItem *updatesNote = [[NSMenuItem alloc] initWithTitle:noteText action:nil keyEquivalent:@""];
         updatesNote.enabled = NO;
         [updatesMenu addItem:updatesNote];
@@ -1720,7 +1967,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     alert.accessoryView = scrollView;
     self.allUpdatesAlert = alert;
     [alert addButtonWithTitle:@"Done"];
-    [alert addButtonWithTitle:@"Update All…"];
+    [alert addButtonWithTitle:@"Update Supported…"];
     [alert addButtonWithTitle:@"Open Markdown Report"];
     NSModalResponse response = [alert runModal];
     self.allUpdatesAlert = nil;
@@ -2122,6 +2369,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 }
 @end
 
+#ifndef CLITICKER_TESTING
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];
@@ -2131,3 +2379,4 @@ int main(int argc, const char *argv[]) {
     }
     return 0;
 }
+#endif
