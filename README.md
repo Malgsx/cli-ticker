@@ -6,19 +6,23 @@
 curl -fsSL https://raw.githubusercontent.com/Malgsx/cli-ticker/main/install.sh | bash
 ```
 
-This downloads the latest release into `~/Applications`, clears the Gatekeeper quarantine flag, and opens the app. Look for the new icon in your menu bar. It also installs a `CLI` command. Run `CLI` to open the menu bar app.
+This downloads the latest release into `~/Applications`, clears the Gatekeeper quarantine flag, and opens the app. Look for the new icon in your menu bar. It also installs a `cli` command (`CLI` is the same command). The copy lives in `~/.local/bin`, and the installer links it into `/usr/local/bin` or `/opt/homebrew/bin` when that directory is writable, which a default macOS zsh already searches. If neither directory is writable, it adds `~/.local/bin` to `PATH` in `~/.zshrc`. Run `cli` to open the menu bar app.
 
 ## Update
 
-After a new release is published, run this in Terminal:
+`cli` and `CLI` are the same command.
+
+Inside a clone of this repo, `cli update` pulls the latest code for your current branch (`git pull --ff-only`) and reinstalls the menu bar app from that checkout:
 
 ```sh
-CLI update
+cli update
 ```
 
-That replaces the app with the latest release and opens it again. `CLI` on its own opens the app you already have. `CLI reload` quits it and opens it again. `CLI version` prints the version and says when a newer release is out.
+Without a clone, the same command installs the latest published GitHub release and opens it.
 
-The menu bar app checks GitHub on launch and every six hours. When a release is newer than the installed app, it posts a notification and the panel footer says to run `CLI update`. A push becomes that update once it is published as a release.
+`cli` on its own opens the app you already have. `cli reload` quits it and opens it again. `cli version` prints the version and says when a newer release is out.
+
+The menu bar app checks GitHub on launch and every six hours. When a release is newer than the installed app, it posts a notification and the panel footer says to run `CLI update`. A push becomes that update once it is published as a release. Inside a clone, `cli update` pulls source instead of installing that release.
 
 ## What it is
 
@@ -50,7 +54,7 @@ To make it your own, click **Fork** at the top of this page, then clone your for
 ./cli run        # build, then open the app
 ./cli test       # run the unit tests
 ./cli install    # build and install to ~/Applications, then launch it
-./cli update     # install the latest published release and relaunch
+./cli update     # pull this checkout and reinstall the app from it
 ./cli uninstall  # quit and remove the installed app and its saved data
 ./cli version    # print the version (from the VERSION file)
 ```
@@ -64,7 +68,12 @@ From a clone, run `./cli uninstall`. Without a clone, paste this into Terminal:
 ```sh
 pkill -x CLITicker
 rm -rf ~/Applications/CLITicker.app ~/Library/Application\ Support/CLITicker
-if grep -q cli-ticker-command ~/.local/bin/CLI 2>/dev/null; then rm -f ~/.local/bin/CLI; fi
+for f in ~/.local/bin/cli /usr/local/bin/CLI /usr/local/bin/cli /opt/homebrew/bin/CLI /opt/homebrew/bin/cli; do
+  if [ -L "$f" ] && grep -q cli-ticker-command "$f" 2>/dev/null; then rm -f "$f"; fi
+done
+if [ -f ~/.local/bin/CLI ] && grep -q cli-ticker-command ~/.local/bin/CLI 2>/dev/null; then rm -f ~/.local/bin/CLI; fi
+if [ -f ~/.local/bin/cli ] && grep -q cli-ticker-command ~/.local/bin/cli 2>/dev/null; then rm -f ~/.local/bin/cli; fi
+if [ -f ~/.zshrc ] && grep -q cli-ticker-command ~/.zshrc; then grep -v cli-ticker-command ~/.zshrc > ~/.zshrc.cli-ticker && mv ~/.zshrc.cli-ticker ~/.zshrc; fi
 ```
 
 ## For AI agents
@@ -91,7 +100,7 @@ To install CLI on the user's Mac, run these steps in order. Stop and report the 
    test -x ~/Applications/CLITicker.app/Contents/MacOS/CLITicker && pgrep -x CLITicker && echo ok
    ```
 
-Tell the user to look for the CLI icon in the menu bar and click it, or to run `CLI` in Terminal to open the panel. `CLI update` installs the latest published release and opens the app. `CLI reload` quits it and opens it again. `CLI version` prints the version and says when a newer release is out. To install without launching the app, set `CLI_TICKER_NO_LAUNCH=1` for the `bash` side of the pipe (`... | CLI_TICKER_NO_LAUNCH=1 bash`). To build from source instead, run the clone command in [Build from source / fork](#build-from-source--fork) from the user's current directory. It needs `xcode-select -p` to succeed first. Inside the clone, use `./cli <command>` for everything (`./cli help` lists them): `./cli install` puts the source build in `~/Applications` and launches it, `./cli test` runs the tests, and `./cli uninstall` removes the app and its data.
+Tell the user to look for the CLI icon in the menu bar and click it, or to run `cli` (or `CLI`) in Terminal to open the panel. Inside a clone, `cli update` pulls the latest source and reinstalls the app from that checkout. With no clone, `CLI update` installs the latest published release and opens the app. `CLI reload` quits it and opens it again. `CLI version` prints the version and says when a newer release is out. To install without launching the app, set `CLI_TICKER_NO_LAUNCH=1` for the `bash` side of the pipe (`... | CLI_TICKER_NO_LAUNCH=1 bash`). To build from source instead, run the clone command in [Build from source / fork](#build-from-source--fork) from the user's current directory. It needs `xcode-select -p` to succeed first. Inside the clone, use `./cli <command>` for everything (`./cli help` lists them): `./cli install` puts the source build in `~/Applications` and launches it, `./cli update` pulls and reinstalls from that checkout, `./cli test` runs the tests, and `./cli uninstall` removes the app and its data.
 
 ## More
 

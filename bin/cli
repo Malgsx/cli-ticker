@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # cli-ticker-command
-# Installed by install.sh as `CLI`.
-#   CLI           open the menu bar app
-#   CLI update    install the latest GitHub release and open the app
-#   CLI reload    quit the app and open it again
-#   CLI version   print the installed version, and say when a newer release exists
+# Installed by install.sh as `cli` and `CLI` (one file on a case-insensitive disk).
+#   cli           open the menu bar app
+#   cli update    inside a clone: git pull --ff-only, then reinstall from that checkout
+#                 anywhere else: install the latest GitHub release and open the app
+#   cli reload    quit the app and open it again
+#   cli version   print the installed version, and say when a newer release exists
 set -euo pipefail
 
 REPO="${CLI_TICKER_REPO:-Malgsx/cli-ticker}"
@@ -14,14 +15,17 @@ APP_PATH="$INSTALL_DIR/$APP_NAME.app"
 
 usage() {
   cat <<'EOF'
-Usage: CLI [command]
+Usage: cli [command]
 
-  CLI        Open the menu bar app
-  update     Install the latest release and open the app
+  cli        Open the menu bar app
+  update     Inside a clone, pull the latest source and reinstall.
+             Anywhere else, install the latest release and open the app.
   reload     Quit the app and open it again
   version    Print the installed version
 
-A new release is published on GitHub. `CLI update` installs that release.
+`cli` and `CLI` are the same command. Inside a git clone, CLI update
+pulls that clone (`git pull --ff-only`) and reinstalls the app from it.
+With no clone, CLI update installs the latest GitHub release.
 EOF
 }
 
@@ -116,6 +120,44 @@ install_latest() {
   curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/install.sh" | CLI_TICKER_REPO="$REPO" bash
 }
 
+# The git root of a checkout of this repo that contains cwd, if any.
+checkout_root() {
+  local dir
+  dir="$(pwd)"
+  while true; do
+    if [[ -f "$dir/bin/cli" ]] && grep -q cli-ticker-command "$dir/bin/cli" 2>/dev/null \
+      && git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+    [[ "$dir" == "/" ]] && return 1
+    dir="$(dirname "$dir")"
+  done
+}
+
+# Pull the current tracking branch, then rebuild and relaunch from that checkout.
+update_from_checkout() {
+  local root="$1"
+  if [[ -n "${CLI_TICKER_DRY_RUN:-}" ]]; then
+    echo "dry-run: would git pull --ff-only in $root"
+    echo "dry-run: would reinstall from $root"
+    return 0
+  fi
+  command -v git >/dev/null || {
+    echo "error: git is required to update a clone." >&2
+    exit 1
+  }
+  echo "Pulling the latest source in $root"
+  git -C "$root" pull --ff-only
+  echo "Reinstalling CLI from $root"
+  # Tests set this so a Linux run can pull without building the macOS app.
+  if [[ -n "${CLI_TICKER_REINSTALL_CMD:-}" ]]; then
+    (cd "$root" && bash -c "$CLI_TICKER_REINSTALL_CMD")
+    return 0
+  fi
+  (cd "$root" && make install)
+}
+
 command="${1:-open}"
 case "$command" in
   -h|--help|help) usage; exit 0 ;;
@@ -134,6 +176,10 @@ case "$command" in
     ;;
   reload) reload_app ;;
   update)
+    if root="$(checkout_root)"; then
+      update_from_checkout "$root"
+      exit 0
+    fi
     latest="$(latest_version)" || {
       echo "error: could not read the latest CLI release." >&2
       exit 1

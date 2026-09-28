@@ -11,7 +11,7 @@ test|test|Build and run the unit tests
 previews|previews|Render the panel with fixture data to build/previews/*.png
 dist|dist|Build the release archive build/dist/CLITicker.app.tar.gz
 install|install|Build and install to ~/Applications, then launch it
-update|update|Install the latest published release and relaunch the app
+update|update|Pull this checkout and reinstall the app from it
 uninstall|uninstall|Quit and remove ~/Applications/CLITicker.app and its saved data
 icons|icons|Regenerate the app and menu bar icons (needs Python 3 with Pillow)
 clean|clean|Remove build/
@@ -38,7 +38,8 @@ case "$command" in
     "") usage; exit 1 ;;
 esac
 
-# `./cli update` is the same command users run as `cli update`: the latest release, not this checkout.
+# `./cli update` is the same command users run as `cli update` inside this checkout:
+# pull the current branch, then reinstall and relaunch from this source.
 if [ "$command" = update ]; then
     exec bin/cli update "$@"
 fi

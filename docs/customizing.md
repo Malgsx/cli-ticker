@@ -14,14 +14,14 @@ Requirements: macOS and the Xcode Command Line Tools (`xcode-select --install`).
 ./cli previews   # render the panel with fixture data to build/previews/*.png
 ./cli dist       # build/dist/CLITicker.app.tar.gz
 ./cli install    # build, install to ~/Applications with install.sh, and launch
-./cli update     # install the latest published release (not this checkout) and relaunch
+./cli update     # pull this checkout and reinstall the app from it
 ./cli uninstall  # quit and remove ~/Applications/CLITicker.app and its saved data
 ./cli icons      # regenerate the app icons (needs Pillow)
 ./cli clean      # remove build/
 ./cli version    # print the version from the VERSION file
 ```
 
-Any command accepts `NAME=value` overrides of the `Makefile` variables below, for example `./cli build BUNDLE_ID=com.you.cli`. `./cli install INSTALL_DIR=/Applications` installs somewhere else. The installed command is `CLI`, which opens the menu bar app. `CLI update` installs the latest published release.
+Any command accepts `NAME=value` overrides of the `Makefile` variables below, for example `./cli build BUNDLE_ID=com.you.cli`. `./cli install INSTALL_DIR=/Applications` installs somewhere else. The installed command is `cli` (and `CLI`). It opens the menu bar app. Inside this checkout, `cli update` pulls the latest source and reinstalls. With no checkout, `CLI update` installs the latest published release.
 
 All paths are relative to the repository root, so the clone can live anywhere.
 
