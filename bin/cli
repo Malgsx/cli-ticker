@@ -8,10 +8,54 @@
 #   cli version   print the installed version, and say when a newer release exists
 set -euo pipefail
 
-REPO="${CLI_TICKER_REPO:-Malgsx/cli-ticker}"
 APP_NAME="CLITicker"
 INSTALL_DIR="${CLI_TICKER_INSTALL_DIR:-$HOME/Applications}"
 APP_PATH="$INSTALL_DIR/$APP_NAME.app"
+
+# The installed command remembers which GitHub repo it came from.
+# Order: CLI_TICKER_REPO, the stamp install.sh writes beside the command,
+# the app's CLITickerRepository, then this upstream repo.
+resolve_script() {
+  local path="${BASH_SOURCE[0]}"
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$path"
+    return
+  fi
+  python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path"
+}
+
+repo_from_plist() {
+  local plist="$APP_PATH/Contents/Info.plist" repo
+  [[ -f "$plist" && -x /usr/libexec/PlistBuddy ]] || return 1
+  repo="$(/usr/libexec/PlistBuddy -c 'Print :CLITickerRepository' "$plist" 2>/dev/null || true)"
+  [[ "$repo" == */* ]] || return 1
+  printf '%s\n' "$repo"
+}
+
+resolve_repo() {
+  if [[ -n "${CLI_TICKER_REPO:-}" ]]; then
+    printf '%s\n' "$CLI_TICKER_REPO"
+    return
+  fi
+  local script dir stamp repo
+  script="$(resolve_script)"
+  dir="$(dirname "$script")"
+  stamp="$dir/cli-ticker-repo"
+  if [[ -f "$stamp" ]]; then
+    repo="$(tr -d '[:space:]' < "$stamp")"
+    if [[ "$repo" == */* ]]; then
+      printf '%s\n' "$repo"
+      return
+    fi
+  fi
+  if repo="$(repo_from_plist)"; then
+    printf '%s\n' "$repo"
+    return
+  fi
+  printf '%s\n' "Malgsx/cli-ticker"
+}
+
+REPO="$(resolve_repo)"
 
 usage() {
   cat <<'EOF'
@@ -114,7 +158,7 @@ reload_app() {
 install_latest() {
   local latest="$1"
   if [[ -n "${CLI_TICKER_DRY_RUN:-}" ]]; then
-    echo "dry-run: would install $latest"
+    echo "dry-run: would install $latest from $REPO"
     return 0
   fi
   curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/install.sh" | CLI_TICKER_REPO="$REPO" bash

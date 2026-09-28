@@ -18,7 +18,7 @@ Inside a clone of this repo, `cli update` pulls the latest code for your current
 cli update
 ```
 
-Without a clone, the same command installs the latest published GitHub release and opens it.
+Without a clone, the same command installs the latest published GitHub release and opens it. Installing from a fork records that fork, so `cli update` installs the fork's release.
 
 `cli` on its own opens the app you already have. `cli reload` quits it and opens it again. `cli version` prints the version and says when a newer release is out.
 
@@ -71,7 +71,7 @@ rm -rf ~/Applications/CLITicker.app ~/Library/Application\ Support/CLITicker
 for f in ~/.local/bin/cli /usr/local/bin/CLI /usr/local/bin/cli /opt/homebrew/bin/CLI /opt/homebrew/bin/cli; do
   if [ -L "$f" ] && grep -q cli-ticker-command "$f" 2>/dev/null; then rm -f "$f"; fi
 done
-if [ -f ~/.local/bin/CLI ] && grep -q cli-ticker-command ~/.local/bin/CLI 2>/dev/null; then rm -f ~/.local/bin/CLI; fi
+if [ -f ~/.local/bin/CLI ] && grep -q cli-ticker-command ~/.local/bin/CLI 2>/dev/null; then rm -f ~/.local/bin/CLI ~/.local/bin/cli-ticker-repo; fi
 if [ -f ~/.local/bin/cli ] && grep -q cli-ticker-command ~/.local/bin/cli 2>/dev/null; then rm -f ~/.local/bin/cli; fi
 if [ -f ~/.zshrc ] && grep -q cli-ticker-command ~/.zshrc; then grep -v cli-ticker-command ~/.zshrc > ~/.zshrc.cli-ticker && mv ~/.zshrc.cli-ticker ~/.zshrc; fi
 ```

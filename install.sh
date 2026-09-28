@@ -73,6 +73,8 @@ install_cli_command() {
     curl -fsSL "$url" -o "$dest" || fail "could not download the cli command."
   fi
   chmod +x "$dest"
+  # Remember this install's repo so a later `cli update` hits a fork, not upstream.
+  printf '%s\n' "$REPO" > "$(dirname "$dest")/cli-ticker-repo"
   # Lowercase sibling. Same inode on case-insensitive disks; symlink otherwise.
   # Status 2 means a foreign `cli` was left alone. Any other failure should stop the install.
   place_command_name "$(dirname "$dest")" cli "$dest" || [[ $? -eq 2 ]]

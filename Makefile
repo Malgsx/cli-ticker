@@ -92,7 +92,7 @@ uninstall:
 	for link in "$(HOME)/.local/bin/cli" /usr/local/bin/CLI /usr/local/bin/cli /opt/homebrew/bin/CLI /opt/homebrew/bin/cli; do \
 	  if [ -L "$$link" ] && grep -q cli-ticker-command "$$link" 2>/dev/null; then rm -f "$$link"; fi; \
 	done
-	if [ -f "$(HOME)/.local/bin/CLI" ] && grep -q cli-ticker-command "$(HOME)/.local/bin/CLI" 2>/dev/null; then rm -f "$(HOME)/.local/bin/CLI"; fi
+	if [ -f "$(HOME)/.local/bin/CLI" ] && grep -q cli-ticker-command "$(HOME)/.local/bin/CLI" 2>/dev/null; then rm -f "$(HOME)/.local/bin/CLI" "$(HOME)/.local/bin/cli-ticker-repo"; fi
 	if [ -f "$(HOME)/.local/bin/cli" ] || [ -L "$(HOME)/.local/bin/cli" ]; then \
 	  if [ ! "$(HOME)/.local/bin/cli" -ef "$(HOME)/.local/bin/CLI" ] && grep -q cli-ticker-command "$(HOME)/.local/bin/cli" 2>/dev/null; then rm -f "$(HOME)/.local/bin/cli"; fi; \
 	fi

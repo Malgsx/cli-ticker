@@ -129,6 +129,20 @@ out="$(cd "$outside" && CLI_TICKER_DRY_RUN=1 CLI_TICKER_INSTALLED_VERSION=0.4.0 
 printf '%s\n' "$out" | grep -qx "CLI 0.4.0"
 out="$(cd "$outside" && CLI_TICKER_DRY_RUN=1 CLI_TICKER_INSTALLED_VERSION=0.4.0 CLI_TICKER_LATEST_VERSION=0.4.0 "$cmd_path/CLI" version)"
 printf '%s\n' "$out" | grep -qx "CLI 0.4.0"
+grep -qx 'Malgsx/cli-ticker' "$cmd_home/.local/bin/cli-ticker-repo"
+
+# A fork install records that repo. Later `cli update` uses it without the env var.
+# CLI_TICKER_REPO still overrides the stamp.
+fork_home="$(mktemp -d)"
+fork_path="$(mktemp -d)"
+HOME="$fork_home" CLI_TICKER_BIN_DIR="$fork_home/.local/bin" CLI_TICKER_LINK_DIRS="$fork_path" \
+  CLI_TICKER_REPO=someone/cli-ticker CLI_TICKER_COMMAND_ONLY=1 bash "$root/install.sh" >/dev/null
+grep -qx 'someone/cli-ticker' "$fork_home/.local/bin/cli-ticker-repo"
+out="$(cd "$outside" && CLI_TICKER_DRY_RUN=1 CLI_TICKER_INSTALLED_VERSION=0.3.0 CLI_TICKER_LATEST_VERSION=0.4.0 "$fork_path/cli" update)"
+printf '%s\n' "$out" | grep -q "dry-run: would install 0.4.0 from someone/cli-ticker"
+out="$(cd "$outside" && CLI_TICKER_DRY_RUN=1 CLI_TICKER_REPO=other/cli-ticker CLI_TICKER_INSTALLED_VERSION=0.3.0 CLI_TICKER_LATEST_VERSION=0.4.0 "$fork_path/cli" update)"
+printf '%s\n' "$out" | grep -q "dry-run: would install 0.4.0 from other/cli-ticker"
+rm -rf "$fork_home" "$fork_path"
 
 # Same inode for cli and CLI (case-insensitive APFS). Reinstalling must keep it.
 ln -f "$cmd_home/.local/bin/CLI" "$cmd_home/.local/bin/cli-hard"

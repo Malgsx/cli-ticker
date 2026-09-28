@@ -87,7 +87,7 @@ The Release workflow fails if the tag does not match `VERSION`. Otherwise it bui
 curl -fsSL https://raw.githubusercontent.com/<you>/cli-ticker/main/install.sh | CLI_TICKER_REPO=<you>/cli-ticker bash
 ```
 
-You can also change the `REPO` default in `install.sh`. `CLI_TICKER_INSTALL_DIR` changes the install folder (default `~/Applications`), and `CLI_TICKER_NO_LAUNCH=1` skips opening the app.
+That install records `<you>/cli-ticker`. Afterwards, `cli` opens the app, and `cli update` with no clone installs that fork's latest release. Inside a clone of the fork, `cli update` pulls the clone's current branch and reinstalls from it. You can also change the `REPO` default in `install.sh`. `CLI_TICKER_INSTALL_DIR` changes the install folder (default `~/Applications`), and `CLI_TICKER_NO_LAUNCH=1` skips opening the app.
 
 If a downloaded build is ever blocked by Gatekeeper, run `xattr -dr com.apple.quarantine ~/Applications/CLITicker.app`, or right-click the app, choose **Open**, then click **Open** in the dialog.
 
