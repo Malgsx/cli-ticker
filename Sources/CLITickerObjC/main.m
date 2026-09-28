@@ -99,6 +99,7 @@ static CommandResult *RunCommandWithTimeout(NSString *launchPath, NSArray<NSStri
     environment[@"HOMEBREW_NO_AUTO_UPDATE"] = @"1";
     environment[@"HOMEBREW_NO_ANALYTICS"] = @"1";
     environment[@"HOMEBREW_NO_INSTALL_CLEANUP"] = @"1";
+    environment[@"NONINTERACTIVE"] = @"1";
     NSMutableArray<NSString *> *environmentStrings = [NSMutableArray array];
     [environment enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *value, __unused BOOL *stop) {
         [environmentStrings addObject:[NSString stringWithFormat:@"%@=%@", key, value]];
@@ -602,6 +603,186 @@ static BOOL LooksLikeAgentName(NSString *name) {
     return NO;
 }
 
+static BOOL PathIsAppleSystem(NSString *path) {
+    if (path.length == 0) return NO;
+    for (NSString *prefix in @[@"/usr/bin/", @"/bin/", @"/usr/sbin/", @"/sbin/", @"/System/", @"/Library/Apple/"]) {
+        if ([path hasPrefix:prefix]) return YES;
+    }
+    return NO;
+}
+
+// nil unless every element is a string. An empty array is a present override.
+static NSArray<NSString *> *StringArguments(id value) {
+    if (![value isKindOfClass:[NSArray class]]) return nil;
+    for (id argument in value) {
+        if (![argument isKindOfClass:[NSString class]]) return nil;
+    }
+    return value;
+}
+
+static BOOL NameIsInteractiveCLI(NSString *name) {
+    if (name.length == 0) return NO;
+    NSString *canonical = PackageAliases()[name] ?: name;
+    if ([AgentToolNames() containsObject:canonical] || [AgentToolNames() containsObject:name]) return YES;
+    return LooksLikeAgentName(name) || LooksLikeAgentName(canonical);
+}
+
+static BOOL EntryIsInteractiveCLI(NSDictionary *entry, NSString *name) {
+    if ([entry[@"interactive"] boolValue]) return YES;
+    if (NameIsInteractiveCLI(name) || NameIsInteractiveCLI(entry[@"id"])) return YES;
+    id bins = entry[@"bins"];
+    NSArray *list = [bins isKindOfClass:[NSArray class]] ? bins : ([bins isKindOfClass:[NSString class]] ? @[bins] : @[]);
+    for (NSString *bin in list) {
+        if (NameIsInteractiveCLI(bin)) return YES;
+    }
+    return NO;
+}
+
+// Registry `open`, when present, is the argv after the binary. Interactive agents
+// launch with no arguments; every other CLI defaults to --help.
+static NSDictionary *OpenActionForCLI(NSDictionary *entry, NSString *executable, NSString *name) {
+    if (executable.length == 0) return nil;
+    NSArray<NSString *> *override = StringArguments(entry[@"open"]);
+    NSArray<NSString *> *arguments = override ?: (EntryIsInteractiveCLI(entry, name) ? @[] : @[@"--help"]);
+    return @{@"executable": executable, @"arguments": arguments};
+}
+
+static NSDictionary *PlanResult(NSDictionary *action, NSString *reason) {
+    if (reason.length > 0) return @{@"reason": reason};
+    NSString *command = ShellCommandForUpdateAction(action);
+    if (command.length == 0) return @{@"reason": @"no safe uninstall for this install method"};
+    return @{@"action": action, @"command": command};
+}
+
+// Argv-only uninstall for one inventory item. Apple system tools and CLIs that
+// ship inside an app bundle are refused; nothing here is interpolated into a shell.
+static NSDictionary *UninstallPlanForItem(NSDictionary *item) {
+    if (![item isKindOfClass:[NSDictionary class]]) return PlanResult(nil, @"nothing to uninstall");
+    NSString *source = [item[@"source"] isKindOfClass:[NSString class]] ? item[@"source"] : @"";
+    NSString *name = [item[@"name"] isKindOfClass:[NSString class]] ? item[@"name"] : @"";
+    NSString *path = [item[@"path"] isKindOfClass:[NSString class]] ? item[@"path"] : @"";
+    if (name.length == 0 && path.length == 0) return PlanResult(nil, @"nothing to uninstall");
+    if (PathIsAppleSystem(path)) return PlanResult(nil, @"Apple system tool");
+    if ([source isEqualToString:SourceAppBundle] || [path containsString:@".app/"]) return PlanResult(nil, @"bundled inside an app");
+    if (name.length == 0) return PlanResult(nil, @"no safe uninstall for this install method");
+
+    if ([source isEqualToString:@"Homebrew"]) return PlanResult(@{@"executable": @"brew", @"arguments": @[@"uninstall", name]}, nil);
+    if ([source isEqualToString:@"Homebrew Cask"]) return PlanResult(@{@"executable": @"brew", @"arguments": @[@"uninstall", @"--cask", name]}, nil);
+    if ([source isEqualToString:@"npm global"]) return PlanResult(@{@"executable": @"npm", @"arguments": @[@"uninstall", @"-g", name]}, nil);
+    if ([source isEqualToString:@"Bun global"]) return PlanResult(@{@"executable": @"bun", @"arguments": @[@"uninstall", @"-g", name]}, nil);
+    if ([source isEqualToString:@"pipx"]) return PlanResult(@{@"executable": @"pipx", @"arguments": @[@"uninstall", name]}, nil);
+    if ([source isEqualToString:@"uv tool"]) return PlanResult(@{@"executable": @"uv", @"arguments": @[@"tool", @"uninstall", name]}, nil);
+    if ([source isEqualToString:@"cargo"]) return PlanResult(@{@"executable": @"cargo", @"arguments": @[@"uninstall", name]}, nil);
+    if ([source isEqualToString:@"gh extension"]) return PlanResult(@{@"executable": @"gh", @"arguments": @[@"extension", @"remove", name]}, nil);
+    if ([source isEqualToString:@"go"]) {
+        BOOL inGoBin = [path containsString:@"/go/bin/"] && ![path containsString:@"/../"] && ![path hasSuffix:@"/"];
+        NSString *leaf = path.lastPathComponent;
+        if (!inGoBin || PathIsAppleSystem(path) || ![leaf isEqualToString:name]) {
+            return PlanResult(nil, @"go binary is not a single file in GOBIN");
+        }
+        return PlanResult(@{@"executable": @"/bin/rm", @"arguments": @[path]}, nil);
+    }
+    return PlanResult(nil, @"no safe uninstall for this install method");
+}
+
+static NSDictionary *UninstallPlanForRegistryStatus(NSDictionary *status) {
+    NSDictionary *item = status[@"inventoryItem"];
+    if ([item isKindOfClass:[NSDictionary class]]) return UninstallPlanForItem(item);
+    NSString *path = [status[@"path"] isKindOfClass:[NSString class]] ? status[@"path"] : @"";
+    if ([status[@"state"] isEqualToString:@"system"] || PathIsAppleSystem(path)) return PlanResult(nil, @"Apple system tool");
+    if ([path containsString:@".app/"]) return PlanResult(nil, @"bundled inside an app");
+    return PlanResult(nil, @"no safe uninstall for this install method");
+}
+
+static NSString *ResolvedExecutable(NSString *name) {
+    if (name.length == 0) return nil;
+    if ([name hasPrefix:@"/"]) return [[NSFileManager defaultManager] isExecutableFileAtPath:name] ? name : nil;
+    return CommandPath(name);
+}
+
+// Runs {executable, arguments} without a shell. Script actions are refused.
+static int ExecuteArgvAction(NSDictionary *action, NSTimeInterval timeout, NSString **output) {
+    if (output) *output = @"";
+    if ([action[@"script"] length] > 0) {
+        if (output) *output = @"script actions are not run as uninstalls";
+        return 126;
+    }
+    NSString *executable = action[@"executable"];
+    NSArray<NSString *> *arguments = StringArguments(action[@"arguments"]);
+    if (![executable isKindOfClass:[NSString class]] || !arguments) {
+        if (output) *output = @"uninstall action is not argv";
+        return 126;
+    }
+    NSString *path = ResolvedExecutable(executable);
+    if (!path) {
+        if (output) *output = [NSString stringWithFormat:@"%@ not found", executable];
+        return 127;
+    }
+    CommandResult *result = RunCommandWithTimeout(path, arguments, timeout);
+    NSString *text = result.standardError.length > 0 ? result.standardError : (result.standardOutput ?: @"");
+    text = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (result.launchError.length > 0) text = result.launchError;
+    if (result.timedOut) text = @"timed out";
+    if (output) *output = text ?: @"";
+    if (result.timedOut) return -2;
+    if (result.launchError.length > 0) return 127;
+    return result.terminationStatus;
+}
+
+static NSString *OpenExecutableForRow(NSDictionary *row, NSDictionary *entry, NSDictionary *item) {
+    NSString *path = [row[@"path"] isKindOfClass:[NSString class]] ? row[@"path"] : nil;
+    if (path.length == 0 && [item[@"path"] isKindOfClass:[NSString class]]) path = item[@"path"];
+    if (path.length > 0) return path;
+    id bins = entry[@"bins"];
+    if ([bins isKindOfClass:[NSArray class]] && [bins.firstObject isKindOfClass:[NSString class]]) return bins.firstObject;
+    if ([bins isKindOfClass:[NSString class]]) return bins;
+    NSString *name = [item[@"name"] isKindOfClass:[NSString class]] ? item[@"name"] : nil;
+    if (name.length == 0) return [row[@"title"] isKindOfClass:[NSString class]] ? row[@"title"] : nil;
+    NSString *canonical = PackageAliases()[name] ?: name;
+    if ([AgentToolNames() containsObject:canonical]) return AgentInvocationName(canonical);
+    return name;
+}
+
+static NSString *SelectionKeyForAnnotatedRow(NSDictionary *row, NSDictionary *item) {
+    if ([row[@"kind"] isEqualToString:@"registry"] && [row[@"id"] isKindOfClass:[NSString class]] && [row[@"id"] length] > 0) {
+        return [@"registry:" stringByAppendingString:row[@"id"]];
+    }
+    if ([item[@"name"] isKindOfClass:[NSString class]] && [item[@"name"] length] > 0) {
+        return [@"item:" stringByAppendingString:InventoryKey(item)];
+    }
+    return nil;
+}
+
+// Copies a panel row and attaches the open command plus a safe uninstall, or the reason it cannot be selected.
+static NSDictionary *AnnotatedCLIRow(NSDictionary *row, NSDictionary *entry) {
+    if (![row isKindOfClass:[NSDictionary class]]) return row;
+    NSMutableDictionary *copy = [row mutableCopy];
+    NSDictionary *item = [copy[@"item"] isKindOfClass:[NSDictionary class]] ? copy[@"item"] : nil;
+    if (!item && [copy[@"inventoryItem"] isKindOfClass:[NSDictionary class]]) item = copy[@"inventoryItem"];
+    NSString *kind = copy[@"kind"] ?: @"";
+    BOOL opens = ![kind isEqualToString:@"updateAll"] && ![kind isEqualToString:@"update"] && ![kind isEqualToString:@"recent"];
+    if (opens) {
+        NSString *executable = OpenExecutableForRow(copy, entry, item);
+        NSString *name = [item[@"name"] isKindOfClass:[NSString class]] ? item[@"name"] : (entry[@"id"] ?: copy[@"title"]);
+        NSDictionary *open = OpenActionForCLI(entry, executable, [name isKindOfClass:[NSString class]] ? name : @"");
+        if (open) {
+            copy[@"openAction"] = open;
+            copy[@"openCommand"] = ShellCommandForUpdateAction(open) ?: @"";
+        }
+    }
+    NSDictionary *plan = item ? UninstallPlanForItem(item) : ([kind isEqualToString:@"registry"] ? UninstallPlanForRegistryStatus(copy) : nil);
+    if (!plan && ![kind isEqualToString:@"updateAll"] && kind.length > 0) plan = PlanResult(nil, @"no safe uninstall for this install method");
+    if (plan[@"action"]) {
+        copy[@"uninstallAction"] = plan[@"action"];
+        copy[@"uninstallCommand"] = plan[@"command"];
+    } else if (plan[@"reason"]) {
+        copy[@"uninstallReason"] = plan[@"reason"];
+    }
+    NSString *key = SelectionKeyForAnnotatedRow(copy, item);
+    if (key && (copy[@"uninstallAction"] || copy[@"uninstallReason"])) copy[@"selectionKey"] = key;
+    return copy;
+}
+
 static NSArray<NSString *> *ExecutablesInDirectory(NSString *directory) {
     NSFileManager *fileManager = [NSFileManager defaultManager];
     NSMutableArray<NSString *> *paths = [NSMutableArray array];
@@ -977,6 +1158,71 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     [controller scheduleWatcherRefresh];
 }
 
+// Tests replace this to observe a launch without starting a terminal.
+static void (^TerminalLaunchHook)(NSString *command, NSString *terminal);
+
+static void PerformTerminalLaunch(NSString *command, NSString *terminal) {
+    if ([terminal isEqualToString:@"Ghostty"] && TerminalInstalled(terminal)) {
+        RunCommand(@"/usr/bin/osascript", @[
+            @"-e", @"on run argv",
+            @"-e", @"tell application \"Ghostty\"",
+            @"-e", @"activate",
+            @"-e", @"set cliTickerConfig to new surface configuration",
+            @"-e", @"set initial input of cliTickerConfig to item 1 of argv & return",
+            @"-e", @"new window with configuration cliTickerConfig",
+            @"-e", @"end tell",
+            @"-e", @"end run",
+            @"--",
+            command
+        ]);
+        return;
+    }
+
+    if ([terminal isEqualToString:@"iTerm"] && TerminalInstalled(terminal)) {
+        NSString *script = [NSString stringWithFormat:
+            @"tell application \"iTerm\"\n"
+             "activate\n"
+             "create window with default profile command \"%@\"\n"
+             "end tell",
+            EscapedAppleScriptString(command)
+        ];
+        RunCommand(@"/usr/bin/osascript", @[@"-e", script]);
+        return;
+    }
+
+    if ([terminal isEqualToString:@"Warp"] && TerminalInstalled(terminal)) {
+        RunCommand(@"/usr/bin/open", @[@"-a", @"Warp"]);
+        NSString *script = [NSString stringWithFormat:
+            @"tell application \"System Events\"\n"
+             "keystroke \"%@\"\n"
+             "key code 36\n"
+             "end tell",
+            EscapedAppleScriptString(command)
+        ];
+        RunCommand(@"/usr/bin/osascript", @[@"-e", script]);
+        return;
+    }
+
+    NSString *script = [NSString stringWithFormat:
+        @"tell application \"Terminal\"\n"
+         "activate\n"
+         "do script \"%@\"\n"
+         "end tell",
+        EscapedAppleScriptString(command)
+    ];
+    RunCommand(@"/usr/bin/osascript", @[@"-e", script]);
+}
+
+// osascript waits until the terminal accepts the script, so the launch always leaves the main queue.
+static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
+    NSString *commandCopy = [command copy] ?: @"";
+    NSString *terminalCopy = [terminal copy] ?: @"";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        if (TerminalLaunchHook) TerminalLaunchHook(commandCopy, terminalCopy);
+        else PerformTerminalLaunch(commandCopy, terminalCopy);
+    });
+}
+
 @implementation MenuController
 
 - (instancetype)init {
@@ -1162,6 +1408,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     return @[
         @{@"command": TickerCommandUpdateAll, @"title": @"Update all", @"detail": [NSString stringWithFormat:@"%lu %@", (unsigned long)updates, updates == 1 ? @"update" : @"updates"], @"shortcut": @"⌘U", @"emphasis": @(updates > 0)},
         @{@"command": TickerCommandRefresh, @"title": @"Check for updates / rescan", @"detail": scanDetail, @"shortcut": @"⌘R"},
+        @{@"command": TickerCommandSelect, @"title": @"Select", @"detail": self.panel.isSelecting ? @"on" : @"off", @"shortcut": @"⌘S", @"emphasis": @(self.panel.isSelecting)},
         @{@"command": TickerCommandUpdateApp, @"title": @"Version", @"detail": versionDetail, @"emphasis": @([self appUpdateAvailable]), @"separator": @YES},
         @{@"command": TickerCommandSettings, @"title": @"Settings", @"shortcut": @"⌘,"},
         @{@"command": TickerCommandMarkdownReport, @"title": @"Open report", @"detail": @"inventory.md", @"shortcut": @"⌘O", @"separator": @YES},
@@ -1749,32 +1996,10 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     }];
 }
 
-- (NSString *)commandForAgentItem:(NSDictionary *)item {
-    NSString *canonicalName = [self displayNameForItem:item];
-    NSString *path = item[@"path"];
-    if (path.length > 0 && [[NSFileManager defaultManager] isExecutableFileAtPath:path]) return path;
-
-    NSString *command = AgentInvocationName(canonicalName);
-    NSString *resolved = CommandPath(command);
-    if (resolved.length > 0) return resolved;
-
-    for (NSString *dir in CommonBinDirectories()) {
-        NSString *candidate = [dir stringByAppendingPathComponent:command];
-        if ([[NSFileManager defaultManager] isExecutableFileAtPath:candidate]) return candidate;
-    }
-
-    return command;
-}
-
-- (NSString *)launchCommandWithLabel:(NSString *)label executable:(NSString *)command {
-    NSString *escapedCommand = ShellSingleQuoteEscaped(command);
-    NSString *escapedLabel = ShellSingleQuoteEscaped(label);
-    return [NSString stringWithFormat:@"printf '\\033]0;CLI - %@\\007'; echo 'Launching %@'; echo; '%@'; echo; echo 'Session finished. Close this window or continue using the shell.'; exec ${SHELL:-/bin/zsh} -l", escapedLabel, escapedLabel, escapedCommand];
-}
-
-- (NSString *)launchCommandForAgentItem:(NSDictionary *)item {
-    NSString *label = [self friendlyAgentName:[self displayNameForItem:item]];
-    return [self launchCommandWithLabel:label executable:[self commandForAgentItem:item]];
+// `command` is already a shell-quoted argv command (see ShellCommandForUpdateAction).
+- (NSString *)terminalSessionLaunchingCommand:(NSString *)command label:(NSString *)label {
+    NSString *safeLabel = ShellSingleQuoteEscaped(label ?: @"CLI");
+    return [NSString stringWithFormat:@"printf '\\033]0;CLI - %@\\007'; echo 'Launching %@'; echo; %@; status=$?; echo; echo \"Finished with exit code $status.\"; exec ${SHELL:-/bin/zsh} -l", safeLabel, safeLabel, command ?: @"true"];
 }
 
 - (NSString *)invocationForCLIItem:(NSDictionary *)item {
@@ -1784,12 +2009,6 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     NSString *name = item[@"name"] ?: @"";
     NSString *path = item[@"path"];
     return name.length > 0 ? name : path.lastPathComponent;
-}
-
-- (NSString *)launchCommandForCLIItem:(NSDictionary *)item {
-    NSString *label = [self friendlyAgentName:[self displayNameForItem:item]];
-    if (label.length == 0) label = item[@"name"] ?: @"CLI";
-    return [self launchCommandWithLabel:label executable:[self invocationForCLIItem:item]];
 }
 
 - (NSArray<NSString *> *)availableTerminals {
@@ -1805,55 +2024,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 }
 
 - (void)runShellCommand:(NSString *)command inTerminal:(NSString *)terminal {
-    if ([terminal isEqualToString:@"Ghostty"] && TerminalInstalled(terminal)) {
-        RunCommand(@"/usr/bin/osascript", @[
-            @"-e", @"on run argv",
-            @"-e", @"tell application \"Ghostty\"",
-            @"-e", @"activate",
-            @"-e", @"set cliTickerConfig to new surface configuration",
-            @"-e", @"set initial input of cliTickerConfig to item 1 of argv & return",
-            @"-e", @"new window with configuration cliTickerConfig",
-            @"-e", @"end tell",
-            @"-e", @"end run",
-            @"--",
-            command
-        ]);
-        return;
-    }
-
-    if ([terminal isEqualToString:@"iTerm"] && TerminalInstalled(terminal)) {
-        NSString *script = [NSString stringWithFormat:
-            @"tell application \"iTerm\"\n"
-             "activate\n"
-             "create window with default profile command \"%@\"\n"
-             "end tell",
-            EscapedAppleScriptString(command)
-        ];
-        RunCommand(@"/usr/bin/osascript", @[@"-e", script]);
-        return;
-    }
-
-    if ([terminal isEqualToString:@"Warp"] && TerminalInstalled(terminal)) {
-        RunCommand(@"/usr/bin/open", @[@"-a", @"Warp"]);
-        NSString *script = [NSString stringWithFormat:
-            @"tell application \"System Events\"\n"
-             "keystroke \"%@\"\n"
-             "key code 36\n"
-             "end tell",
-            EscapedAppleScriptString(command)
-        ];
-        RunCommand(@"/usr/bin/osascript", @[@"-e", script]);
-        return;
-    }
-
-    NSString *script = [NSString stringWithFormat:
-        @"tell application \"Terminal\"\n"
-         "activate\n"
-         "do script \"%@\"\n"
-         "end tell",
-        EscapedAppleScriptString(command)
-    ];
-    RunCommand(@"/usr/bin/osascript", @[@"-e", script]);
+    DispatchTerminalLaunch(command, terminal);
 }
 
 - (NSArray<NSDictionary *> *)notableUpdateItems:(NSUInteger)limit {
@@ -2123,13 +2294,13 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     NSArray *registryRows = self.registry.statuses;
     NSUInteger registryOutdated = 0;
     for (NSDictionary *row in registryRows) if ([row[@"state"] isEqualToString:@"outdated"]) registryOutdated++;
-    NSArray *cliRows = scanning ? @[] : [registryRows arrayByAddingObjectsFromArray:[self panelOtherCLIRows]];
+    NSArray *cliRows = scanning ? @[] : [self annotatedRows:[registryRows arrayByAddingObjectsFromArray:[self panelOtherCLIRows]]];
     NSMutableArray *views = [NSMutableArray arrayWithObject:@{@"id": @"clis", @"label": @"CLIs", @"symbol": @"square.stack.3d.up", @"rows": cliRows, @"columns": @[@"Name ·", @"Version", @"Via", @"Status"]}];
-    if ([self showsAgents]) [views addObject:@{@"id": @"agents", @"label": @"Agents", @"symbol": @"sparkles", @"rows": [self panelAgentRows], @"columns": @[@"Name ·", @"Version", @"Via", @"Action"]}];
+    if ([self showsAgents]) [views addObject:@{@"id": @"agents", @"label": @"Agents", @"symbol": @"sparkles", @"rows": [self annotatedRows:[self panelAgentRows]], @"columns": @[@"Name ·", @"Version", @"Via", @"Action"]}];
     [views addObjectsFromArray:@[
-        @{@"id": @"updates", @"label": @"Updates", @"symbol": @"arrow.down.circle", @"rows": [self panelUpdateRows], @"count": @([self countWithStatus:StatusOutdated]), @"columns": @[@"Name ·", @"Version", @"Via", @"Action"]},
-        @{@"id": @"recent", @"label": @"Recent", @"symbol": @"clock", @"rows": [self panelRecentRows], @"columns": @[@"Name ·", @"Change", @"Via", @"When"]},
-        @{@"id": @"all", @"label": @"All", @"symbol": @"list.bullet", @"rows": [self panelAllRows], @"columns": @[@"Name ·", @"Version", @"Via", @"Status"]}
+        @{@"id": @"updates", @"label": @"Updates", @"symbol": @"arrow.down.circle", @"rows": [self annotatedRows:[self panelUpdateRows]], @"count": @([self countWithStatus:StatusOutdated]), @"columns": @[@"Name ·", @"Version", @"Via", @"Action"]},
+        @{@"id": @"recent", @"label": @"Recent", @"symbol": @"clock", @"rows": [self annotatedRows:[self panelRecentRows]], @"columns": @[@"Name ·", @"Change", @"Via", @"When"]},
+        @{@"id": @"all", @"label": @"All", @"symbol": @"list.bullet", @"rows": [self annotatedRows:[self panelAllRows]], @"columns": @[@"Name ·", @"Version", @"Via", @"Status"]}
     ]];
     NSUInteger outdated = [self countWithStatus:StatusOutdated];
     NSUInteger unknown = [self countWithStatus:StatusUnknown];
@@ -2158,25 +2329,80 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         row[@"meta"] = item[@"source"] ?: @"";
         [rows addObject:row];
     }
-    return rows;
+    return [self annotatedRows:rows];
+}
+
+- (NSArray<NSDictionary *> *)annotatedRows:(NSArray<NSDictionary *> *)rows {
+    NSMutableArray *annotated = [NSMutableArray arrayWithCapacity:rows.count];
+    for (NSDictionary *row in rows) {
+        NSDictionary *entry = nil;
+        if ([row[@"id"] isKindOfClass:[NSString class]]) {
+            for (NSDictionary *candidate in self.registry.entries) {
+                if ([candidate[@"id"] isEqualToString:row[@"id"]]) { entry = candidate; break; }
+            }
+        }
+        [annotated addObject:AnnotatedCLIRow(row, entry ?: @{})];
+    }
+    return annotated;
+}
+
+- (void)runUninstallPlans:(NSArray<NSDictionary *> *)plans progress:(void (^)(NSUInteger index, NSString *state, NSString *detail))progress completion:(void (^)(NSArray<NSDictionary *> *results))completion {
+    NSArray *plansCopy = [plans copy] ?: @[];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSMutableArray *results = [NSMutableArray arrayWithCapacity:plansCopy.count];
+        for (NSUInteger index = 0; index < plansCopy.count; index++) {
+            NSDictionary *plan = plansCopy[index];
+            NSString *command = plan[@"command"] ?: @"";
+            dispatch_sync(dispatch_get_main_queue(), ^{
+                if (progress) progress(index, @"running", command);
+            });
+            NSString *output = nil;
+            int code = ExecuteArgvAction(plan[@"action"], 600, &output);
+            NSString *state = code == 0 ? @"removed" : @"failed";
+            NSString *detail = code == 0 ? @"removed" : (output.length > 0 ? output : [NSString stringWithFormat:@"exit %d", code]);
+            NSMutableDictionary *result = [plan mutableCopy];
+            result[@"exit"] = @(code);
+            result[@"state"] = state;
+            result[@"detail"] = detail;
+            [results addObject:result];
+            dispatch_sync(dispatch_get_main_queue(), ^{
+                if (progress) progress(index, state, detail);
+            });
+        }
+        NSArray *finished = [results copy];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(finished);
+        });
+    });
 }
 
 - (void)tickerPanel:(TickerPanelController *)panel activateRow:(NSDictionary *)row {
     NSString *kind = row[@"kind"];
     NSDictionary *item = row[@"item"];
-    if ([kind isEqualToString:@"registry"]) return;
-    [panel close];
     if ([kind isEqualToString:@"updateAll"]) {
+        [panel close];
         [NSApp activateIgnoringOtherApps:YES];
         [self updateAll:nil];
-    } else if ([kind isEqualToString:@"update"] && item) {
+        return;
+    }
+    if ([kind isEqualToString:@"update"] && item) {
+        [panel close];
         [NSApp activateIgnoringOtherApps:YES];
         [self runUpdateForItem:item confirm:YES];
-    } else if ([kind isEqualToString:@"agent"] && item) {
-        [self runInPreferredTerminal:[self launchCommandForAgentItem:item]];
-    } else if (item) {
-        [self runInPreferredTerminal:[self launchCommandForCLIItem:item]];
+        return;
     }
+    NSString *command = row[@"openCommand"];
+    if (command.length == 0) return;
+    [panel close];
+    [self runInPreferredTerminal:[self terminalSessionLaunchingCommand:command label:row[@"title"] ?: @"CLI"]];
+}
+
+- (void)tickerPanel:(TickerPanelController *)panel runUninstallPlans:(NSArray<NSDictionary *> *)plans progress:(void (^)(NSUInteger index, NSString *state, NSString *detail))progress completion:(void (^)(void))completion {
+    [self runUninstallPlans:plans progress:progress completion:^(NSArray<NSDictionary *> *results) {
+        (void)results;
+        [self refresh:nil];
+        if (completion) completion();
+    }];
 }
 
 - (void)tickerPanel:(TickerPanelController *)panel pressButtonOnRow:(NSDictionary *)row {
@@ -2242,6 +2468,124 @@ static BOOL RegistryDumpSettled(BOOL *sawActivity, BOOL refreshing, BOOL checkin
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     self.menuController = [[MenuController alloc] init];
     [self startRegistryDumpIfRequested];
+    [self startUninstallExerciseIfRequested];
+}
+
+// `--exercise-uninstall <dir> <name> ...` waits for the inventory scan, builds the safe
+// uninstall argv for each name, runs those commands in order, rescans, and writes a report.
+// The flag is the harness's explicit confirmation; the panel never calls this without the sheet.
+- (void)startUninstallExerciseIfRequested {
+    NSArray<NSString *> *arguments = [[NSProcessInfo processInfo] arguments];
+    NSUInteger flag = [arguments indexOfObject:@"--exercise-uninstall"];
+    if (flag == NSNotFound || flag + 1 >= arguments.count) return;
+    NSString *directory = arguments[flag + 1];
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (NSUInteger index = flag + 2; index < arguments.count; index++) {
+        NSString *name = arguments[index];
+        if ([name hasPrefix:@"--"]) break;
+        if (name.length > 0) [names addObject:name];
+    }
+    if (names.count == 0) {
+        fprintf(stderr, "exercise-uninstall: pass a directory and at least one CLI name\n");
+        exit(2);
+    }
+    [[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
+
+    MenuController *controller = self.menuController;
+    NSDate *started = [NSDate date];
+    __block BOOL sawRefresh = NO;
+    __block BOOL rescanRequested = NO;
+    __block NSInteger phase = 0;
+    __block BOOL uninstallFinished = NO;
+    __block NSArray<NSDictionary *> *results = nil;
+
+    NSDictionary *(^bestItem)(NSString *) = ^NSDictionary *(NSString *name) {
+        NSDictionary *best = nil;
+        NSInteger bestRank = -1;
+        for (NSDictionary *item in controller.items) {
+            NSString *itemName = item[@"name"] ?: @"";
+            NSString *leaf = [item[@"path"] lastPathComponent] ?: @"";
+            if (![itemName isEqualToString:name] && ![itemName.lastPathComponent isEqualToString:name] && ![leaf isEqualToString:name]) continue;
+            NSDictionary *plan = UninstallPlanForItem(item);
+            if (!plan[@"action"]) continue;
+            NSString *source = item[@"source"] ?: @"";
+            NSInteger rank = 10;
+            if ([source isEqualToString:@"Homebrew"] || [source isEqualToString:@"Homebrew Cask"]) rank = 100;
+            else if ([source isEqualToString:@"npm global"]) rank = 90;
+            else if ([source isEqualToString:@"pipx"] || [source isEqualToString:@"uv tool"] || [source isEqualToString:@"cargo"] || [source isEqualToString:@"go"] || [source isEqualToString:@"Bun global"] || [source isEqualToString:@"gh extension"]) rank = 80;
+            if (rank > bestRank) { best = item; bestRank = rank; }
+        }
+        return best;
+    };
+
+    [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
+        if (-[started timeIntervalSinceNow] > 600) {
+            fprintf(stderr, "exercise-uninstall timed out in phase %ld\n", (long)phase);
+            [timer invalidate];
+            exit(1);
+        }
+        if (phase == 0) {
+            if (controller.refreshing) sawRefresh = YES;
+            if (!sawRefresh || controller.refreshing) return;
+            NSMutableArray *plans = [NSMutableArray array];
+            NSMutableArray *preview = [NSMutableArray array];
+            for (NSString *name in names) {
+                NSDictionary *item = bestItem(name);
+                NSDictionary *plan = item ? UninstallPlanForItem(item) : nil;
+                if (!plan[@"action"]) {
+                    fprintf(stderr, "exercise-uninstall: no safe uninstall for %s\n", name.UTF8String);
+                    [timer invalidate];
+                    exit(1);
+                }
+                [plans addObject:@{@"name": name, @"source": item[@"source"] ?: @"", @"title": name, @"command": plan[@"command"], @"action": plan[@"action"], @"state": @"pending"}];
+                [preview addObject:@{@"name": name, @"source": item[@"source"] ?: @"", @"command": plan[@"command"]}];
+            }
+            [[NSJSONSerialization dataWithJSONObject:@{@"plans": preview} options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil]
+                writeToFile:[directory stringByAppendingPathComponent:@"uninstall-plans.json"] atomically:YES];
+            phase = 1;
+            [controller runUninstallPlans:plans progress:^(NSUInteger index, NSString *state, NSString *detail) {
+                fprintf(stderr, "uninstall %s: %s %s\n", names[index].UTF8String, state.UTF8String, detail.UTF8String ?: "");
+            } completion:^(NSArray<NSDictionary *> *finished) {
+                results = finished;
+                uninstallFinished = YES;
+            }];
+            return;
+        }
+        if (phase == 1) {
+            if (!uninstallFinished) return;
+            // A file-watcher rescan can be in flight from the uninstall itself. Wait until the
+            // app is idle, then start one more scan so the report sees the removed CLIs.
+            if (!rescanRequested) {
+                if (controller.refreshing) return;
+                rescanRequested = YES;
+                [controller refresh:nil];
+                return;
+            }
+            if (controller.refreshing) return;
+            NSMutableArray *remaining = [NSMutableArray array];
+            for (NSString *name in names) {
+                for (NSDictionary *item in controller.items) {
+                    NSString *itemName = item[@"name"] ?: @"";
+                    NSString *leaf = [item[@"path"] lastPathComponent] ?: @"";
+                    if ([itemName isEqualToString:name] || [leaf isEqualToString:name]) {
+                        [remaining addObject:@{@"name": itemName, @"source": item[@"source"] ?: @"", @"path": item[@"path"] ?: @""}];
+                    }
+                }
+            }
+            NSMutableArray *reportRows = [NSMutableArray array];
+            BOOL failed = remaining.count > 0;
+            for (NSDictionary *result in results) {
+                [reportRows addObject:@{@"name": result[@"name"] ?: @"", @"source": result[@"source"] ?: @"", @"command": result[@"command"] ?: @"", @"exit": result[@"exit"] ?: @(-1), @"state": result[@"state"] ?: @""}];
+                if ([result[@"exit"] integerValue] != 0) failed = YES;
+            }
+            NSDictionary *report = @{@"results": reportRows, @"remaining": remaining};
+            [[NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil]
+                writeToFile:[directory stringByAppendingPathComponent:@"uninstall-result.json"] atomically:YES];
+            [timer invalidate];
+            fprintf(stderr, "exercise-uninstall %s\n", failed ? "failed" : "ok");
+            exit(failed ? 1 : 0);
+        }
+    }];
 }
 
 // `--dump-registry <dir>` waits for the first real scan and version checks, then writes

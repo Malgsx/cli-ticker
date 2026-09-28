@@ -26,6 +26,15 @@
     row[@"emphasis"] = @(latest != nil);
     if ([state isEqualToString:@"outdated"]) { row[@"updateAction"] = @{@"executable": @"true", @"arguments": @[]}; row[@"updateCommand"] = @"fixture"; }
     if (updateState) row[@"updateState"] = updateState;
+    row[@"selectionKey"] = [@"registry:" stringByAppendingString:entryId];
+    if ([entryId isEqualToString:@"git"]) {
+        row[@"uninstallReason"] = @"Apple system tool";
+    } else if ([entryId isEqualToString:@"cursor"]) {
+        row[@"uninstallReason"] = @"bundled inside an app";
+    } else {
+        row[@"uninstallCommand"] = [NSString stringWithFormat:@"brew uninstall %@", entryId];
+        row[@"uninstallAction"] = @{@"executable": @"brew", @"arguments": @[@"uninstall", entryId]};
+    }
     return row;
 }
 
@@ -107,6 +116,7 @@
     NSArray *menu = @[
         @{@"command": TickerCommandUpdateAll, @"title": @"Update all", @"detail": @"9 updates", @"shortcut": @"⌘U", @"emphasis": @YES},
         @{@"command": TickerCommandRefresh, @"title": @"Check for updates / rescan", @"detail": @"4m ago", @"shortcut": @"⌘R"},
+        @{@"command": TickerCommandSelect, @"title": @"Select", @"detail": @"off", @"shortcut": @"⌘S"},
         @{@"command": TickerCommandUpdateApp, @"title": @"Version", @"detail": @"0.2.0 · update → 0.3.0", @"emphasis": @YES, @"separator": @YES},
         @{@"command": TickerCommandSettings, @"title": @"Settings", @"shortcut": @"⌘,"},
         @{@"command": TickerCommandMarkdownReport, @"title": @"Open report", @"detail": @"inventory.md", @"shortcut": @"⌘O", @"separator": @YES},
@@ -243,9 +253,24 @@ BOOL RenderPanelPreviewsIfRequested(void) {
     [panel hideSettings];
     source.scanning = YES;
     BOOL scanOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"first-run-scan.png"], YES);
+    source.scanning = NO;
+    [panel hideSettings];
+    [panel hideMenu];
+    panel.selectedViewId = @"clis";
+    [panel setSelectMode:YES];
+    [panel setPreviewSelectionKeys:@[@"registry:gh", @"registry:aws"]];
+    BOOL selectOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"select-mode.png"], YES);
+    [panel presentUninstallConfirmation:@[
+        @{@"title": @"GitHub CLI", @"command": @"brew uninstall gh", @"state": @"pending"},
+        @{@"title": @"AWS CLI", @"command": @"brew uninstall awscli", @"state": @"pending"},
+        @{@"title": @"cowsay", @"command": @"npm uninstall -g cowsay", @"state": @"pending"},
+        @{@"title": @"tree", @"command": @"brew uninstall tree", @"state": @"pending"}
+    ]];
+    BOOL confirmOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"uninstall-confirm.png"], YES);
 
-    fprintf(stderr, "menubar-preview: %s, cli-list-preview: %s, hamburger-menu: %s, settings-preview: %s, first-run-scan: %s\n",
-            menuBarOK ? "ok" : "failed", listOK ? "ok" : "failed", menuOK ? "ok" : "failed", settingsOK ? "ok" : "failed", scanOK ? "ok" : "failed");
-    exit(menuBarOK && listOK && menuOK && settingsOK && scanOK ? 0 : 1);
+    fprintf(stderr, "menubar-preview: %s, cli-list-preview: %s, hamburger-menu: %s, settings-preview: %s, first-run-scan: %s, select-mode: %s, uninstall-confirm: %s\n",
+            menuBarOK ? "ok" : "failed", listOK ? "ok" : "failed", menuOK ? "ok" : "failed", settingsOK ? "ok" : "failed", scanOK ? "ok" : "failed",
+            selectOK ? "ok" : "failed", confirmOK ? "ok" : "failed");
+    exit(menuBarOK && listOK && menuOK && settingsOK && scanOK && selectOK && confirmOK ? 0 : 1);
     return YES;
 }
