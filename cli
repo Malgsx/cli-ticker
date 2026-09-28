@@ -1,43 +1,55 @@
 #!/usr/bin/env sh
+# The front door for every developer action. Each command runs a Makefile target.
 set -eu
 
-usage() {
-    cat <<'EOF'
-Usage: ./cli <command>
+cd "$(dirname "$0")"
 
-Commands:
-  run     Build and open CLI
-  build   Build CLI
-  dist    Build the distributable archive
-  clean   Remove build artifacts
+# command|make target|description
+COMMANDS='build|all|Build build/CLITicker.app
+run|run|Build, then open the app
+test|test|Build and run the unit tests
+previews|previews|Render the panel with fixture data to build/previews/*.png
+dist|dist|Build the release archive build/dist/CLITicker.app.tar.gz
+install|install|Build and install to ~/Applications, then launch it
+uninstall|uninstall|Quit and remove ~/Applications/CLITicker.app and its saved data
+icons|icons|Regenerate the app and menu bar icons (needs Python 3 with Pillow)
+clean|clean|Remove build/
+version|version|Print the version from the VERSION file
+help||Show this list'
+
+usage() {
+    printf 'Usage: ./cli <command> [NAME=value ...]\n\nCommands:\n'
+    printf '%s\n' "$COMMANDS" | while IFS='|' read -r name _ description; do
+        printf '  %-10s %s\n' "$name" "$description"
+    done
+    cat <<'EOF'
+
+NAME=value pairs override Makefile variables, for example:
+  ./cli build BUNDLE_ID=com.you.cli DISPLAY_NAME="My CLI"
 EOF
 }
 
 command="${1:-}"
+[ $# -gt 0 ] && shift
 
 case "$command" in
-    run)
-        make run
-        ;;
-    build)
-        make
-        ;;
-    dist)
-        make dist
-        ;;
-    clean)
-        make clean
-        ;;
-    -h|--help|help)
-        usage
-        ;;
-    "")
-        usage
-        exit 1
-        ;;
-    *)
-        printf 'Unknown command: %s\n\n' "$command" >&2
-        usage >&2
-        exit 1
-        ;;
+    help|-h|--help) usage; exit 0 ;;
+    "") usage; exit 1 ;;
 esac
+
+target="$(printf '%s\n' "$COMMANDS" | awk -F'|' -v c="$command" '$1 == c { print $2 }')"
+if [ -z "$target" ]; then
+    printf 'Unknown command: %s\n\n' "$command" >&2
+    usage >&2
+    exit 1
+fi
+
+if ! command -v make >/dev/null 2>&1; then
+    echo "error: make not found. Install the Xcode Command Line Tools: xcode-select --install" >&2
+    exit 1
+fi
+
+if [ "$target" = version ]; then
+    exec make --no-print-directory -s version "$@"
+fi
+exec make "$target" "$@"

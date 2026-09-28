@@ -17,9 +17,15 @@ command -v curl >/dev/null || fail "curl is required."
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
-echo "Downloading $ASSET_URL"
-curl -fsSL "$ASSET_URL" -o "$tmpdir/$APP_NAME.app.tar.gz" \
-  || fail "could not download $ASSET_URL."
+if [[ -n "${CLI_TICKER_ARCHIVE:-}" ]]; then
+  [[ -f "$CLI_TICKER_ARCHIVE" ]] || fail "$CLI_TICKER_ARCHIVE does not exist."
+  echo "Using $CLI_TICKER_ARCHIVE"
+  cp "$CLI_TICKER_ARCHIVE" "$tmpdir/$APP_NAME.app.tar.gz"
+else
+  echo "Downloading $ASSET_URL"
+  curl -fsSL "$ASSET_URL" -o "$tmpdir/$APP_NAME.app.tar.gz" \
+    || fail "could not download $ASSET_URL."
+fi
 tar -xzf "$tmpdir/$APP_NAME.app.tar.gz" -C "$tmpdir"
 [[ -x "$tmpdir/$APP_NAME.app/Contents/MacOS/$APP_NAME" ]] || fail "the release archive does not contain $APP_NAME.app."
 

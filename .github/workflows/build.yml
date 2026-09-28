@@ -13,16 +13,16 @@ jobs:
       - name: Install icon dependency
         run: python3 -m pip install --break-system-packages pillow
       - name: Run tests
-        run: make test
+        run: ./cli test
       - name: Build app
-        run: make
+        run: ./cli build
       - name: Registry icons are build inputs
         run: |
           make -q build/CLITicker.app/Contents/MacOS/CLITicker
           sleep 2
           touch Assets/CLIRegistry/icons/bun.png
           if make -q build/CLITicker.app/Contents/MacOS/CLITicker; then echo "touching a registry icon did not make the app bundle stale" >&2; exit 1; fi
-          make
+          ./cli build
       - name: Verify app bundle
         run: |
           test -x build/CLITicker.app/Contents/MacOS/CLITicker
@@ -30,9 +30,32 @@ jobs:
           test -f build/CLITicker.app/Contents/Resources/CLITicker.icns
           test -f build/CLITicker.app/Contents/Resources/CLIStatusTemplate.png
           python3 -m json.tool build/CLITicker.app/Contents/Resources/CLIRegistry/registry.json >/dev/null
+      - name: Version comes from the VERSION file and is not behind the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(./cli version)"
+          built="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/CLITicker.app/Contents/Info.plist)"
+          latest="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName 2>/dev/null || true)"
+          echo "VERSION $version, built $built, latest release ${latest:-none}"
+          test "$built" = "$version"
+          [ -n "$latest" ] || exit 0
+          # A source build older than the latest release would show a false "update available".
+          python3 - "$version" "${latest#v}" <<'PY'
+          import sys
+          have, latest = (tuple(int(p) for p in v.split(".")) for v in sys.argv[1:])
+          assert have >= latest, f"VERSION {sys.argv[1]} is behind the latest release {sys.argv[2]}; bump VERSION"
+          PY
+      - name: ./cli lists every command
+        run: |
+          ./cli help
+          for c in build run test previews dist install uninstall icons clean version help; do
+            ./cli help | grep -qE "^  $c " || { echo "./cli help is missing $c" >&2; exit 1; }
+          done
+          if ./cli nope 2>/dev/null; then echo "unknown commands should fail" >&2; exit 1; fi
       - name: Render panel previews
         run: |
-          make previews
+          ./cli previews
           test -s build/previews/first-run-scan.png
           test -s build/previews/hamburger-menu.png
           test -s build/previews/settings-preview.png
@@ -75,7 +98,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build the release archive
-        run: make dist
+        run: ./cli dist
       - name: Install CLIs to detect
         run: |
           set -x
@@ -89,8 +112,8 @@ jobs:
           chmod +x ~/.local/share/acme/acme-agent
           ln -sf ~/.local/share/acme/acme-agent ~/.local/bin/acme-agent
           test ! -e ~/Library/Application\ Support/CLITicker
-      - name: Install with install.sh (opens the app, which runs the first scan)
-        run: CLI_TICKER_ASSET_URL="file://$PWD/build/dist/CLITicker.app.tar.gz" bash install.sh | tee install.log
+      - name: ./cli install (runs install.sh on this build, which opens the app and starts the first scan)
+        run: ./cli install | tee install.log
       - name: Wait for the first scan and check what it found
         run: |
           grep -q "First launch: CLI is scanning this Mac" install.log
@@ -133,6 +156,11 @@ jobs:
           others = {o["title"] for o in summary["otherCLIs"]}
           assert {"tree", "pycowsay"} <= others, f"unregistered CLIs missing from the CLIs view: {others}"
           PY
+      - name: ./cli uninstall removes the app and its data
+        run: |
+          ./cli uninstall
+          test ! -e ~/Applications/CLITicker.app
+          test ! -e ~/Library/Application\ Support/CLITicker
       - name: Upload scan output
         if: always()
         uses: actions/upload-artifact@v4
