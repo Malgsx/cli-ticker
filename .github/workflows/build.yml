@@ -20,6 +20,14 @@ jobs:
           plutil -lint build/CLITicker.app/Contents/Info.plist
           test -f build/CLITicker.app/Contents/Resources/CLITicker.icns
           test -f build/CLITicker.app/Contents/Resources/CLIStatusTemplate.png
+          python3 -m json.tool build/CLITicker.app/Contents/Resources/CLIRegistry/registry.json >/dev/null
+      - name: Render panel previews
+        run: make previews
+      - name: Upload panel previews
+        uses: actions/upload-artifact@v4
+        with:
+          name: panel-previews
+          path: build/previews/*.png
       - name: Smoke test launch
         run: |
           build/CLITicker.app/Contents/MacOS/CLITicker &
