@@ -99,10 +99,24 @@ printf 'pulled\n' >> "$pull_tmp/seed/README"
 git -C "$pull_tmp/seed" add README
 git -C "$pull_tmp/seed" commit -m pulled >/dev/null
 git -C "$pull_tmp/seed" push origin main >/dev/null
-out="$(cd "$pull_tmp/clone" && CLI_TICKER_REINSTALL_CMD=true "$cli" update)"
-printf '%s\n' "$out" | grep -q "Pulling the latest source in $pull_tmp/clone"
-printf '%s\n' "$out" | grep -q "Reinstalling CLI from $pull_tmp/clone"
-grep -q pulled "$pull_tmp/clone/README"
+update_err="$pull_tmp/update.err"
+if ! out="$(cd "$pull_tmp/clone" && CLI_TICKER_REINSTALL_CMD=true "$cli" update 2>"$update_err")"; then
+  echo "fast-forward update failed" >&2
+  printf '%s\n' "$out" >&2
+  cat "$update_err" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$out" | grep -F -q -- "Pulling the latest source in $pull_tmp/clone" \
+  || ! printf '%s\n' "$out" | grep -F -q -- "Reinstalling CLI from $pull_tmp/clone" \
+  || ! grep -F -q -- pulled "$pull_tmp/clone/README"; then
+  echo "fast-forward update output did not match" >&2
+  printf '%s\n' "$out" >&2
+  echo "stderr:" >&2
+  cat "$update_err" >&2
+  echo "readme:" >&2
+  cat "$pull_tmp/clone/README" >&2
+  exit 1
+fi
 mkdir -p "$pull_tmp/clone/nested"
 out="$(cd "$pull_tmp/clone/nested" && CLI_TICKER_DRY_RUN=1 "$cli" update)"
 printf '%s\n' "$out" | grep -q "dry-run: would git pull --ff-only in $pull_tmp/clone"

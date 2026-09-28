@@ -192,7 +192,26 @@ update_from_checkout() {
     exit 1
   }
   echo "Pulling the latest source in $root"
-  git -C "$root" pull --ff-only
+  # Git 2.55 can exit 1 from `git pull` after it has already moved the
+  # upstream ref and before it fast-forwards the worktree. If that tip
+  # moved and HEAD can still fast-forward onto it, finish the merge.
+  local before after
+  before="$(git -C "$root" rev-parse '@{u}' 2>/dev/null || true)"
+  if [[ -z "$before" ]]; then
+    echo "error: this clone has no upstream branch to pull." >&2
+    exit 1
+  fi
+  if ! git -C "$root" pull --ff-only; then
+    after="$(git -C "$root" rev-parse '@{u}' 2>/dev/null || true)"
+    if [[ -n "$after" && "$before" != "$after" ]] && git -C "$root" merge-base --is-ancestor HEAD '@{u}'; then
+      if ! git -C "$root" diff --quiet HEAD '@{u}'; then
+        git -C "$root" merge --ff-only --no-edit '@{u}'
+      fi
+    else
+      echo "error: could not fast-forward $root." >&2
+      exit 1
+    fi
+  fi
   echo "Reinstalling CLI from $root"
   # Tests set this so a Linux run can pull without building the macOS app.
   if [[ -n "${CLI_TICKER_REINSTALL_CMD:-}" ]]; then
