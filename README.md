@@ -81,7 +81,7 @@ open build/CLITicker.app
 
 The runnable app is `build/CLITicker.app`.
 
-## Create A Shareable Zip
+## Create A Shareable Archive
 
 ```sh
 ./cli dist
