@@ -20,7 +20,7 @@ All paths are relative to the repository root, so the clone can live anywhere.
 ## Project layout
 
 - `Sources/CLITickerObjC/main.m`: the app core. `InventoryService` scans package managers, and `MenuController` owns the menu, reports, and terminal launching.
-- `Sources/CLITickerObjC/TickerPanel.m`: the menu bar panel.
+- `Sources/CLITickerObjC/TickerPanel.m`: the menu bar panel, including its in-panel ☰ menu and settings view (their items come from `panelMenuItems` / `panelSettings` in `main.m`). There is no native `NSMenu`; right-click on the menu bar icon opens the panel with the menu showing. `make REPO=<you>/cli-ticker` points the app's own update check and About link at your fork.
 - `Sources/CLITickerObjC/CLIRegistry.m`: registry CLI detection, update checks, and updates with streamed progress.
 - `Assets/CLIRegistry/registry.json`: the data-driven list of known CLIs (binaries, version parsing, package names, update commands, GitHub release repos). Add an entry to support a new CLI. `Assets/CLIRegistry/icons/` holds [Simple Icons](https://simpleicons.org) templates, which you can regenerate with `scripts/fetch_cli_icons.py`.
 - `Assets/Logos/`: PNG logos for agent tools.

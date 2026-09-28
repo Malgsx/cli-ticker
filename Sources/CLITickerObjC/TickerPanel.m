@@ -4,7 +4,9 @@ NSString *const TickerCommandRefresh = @"refresh";
 NSString *const TickerCommandUpdateAll = @"updateAll";
 NSString *const TickerCommandJSONReport = @"jsonReport";
 NSString *const TickerCommandMarkdownReport = @"markdownReport";
-NSString *const TickerCommandClassicMenu = @"classicMenu";
+NSString *const TickerCommandSettings = @"settings";
+NSString *const TickerCommandUpdateApp = @"updateApp";
+NSString *const TickerCommandOpenGitHub = @"openGitHub";
 NSString *const TickerCommandQuit = @"quit";
 
 const NSSize TickerPanelSize = {600, 420};
@@ -17,6 +19,10 @@ static const CGFloat RowHeight = 22;
 static const CGFloat StatusColumnWidth = 88;
 static const CGFloat ViaColumnWidth = 46;
 static const CGFloat VersionColumnWidth = 124;
+static const CGFloat MenuWidth = 320;
+static const CGFloat MenuRowHeight = 22;
+static const CGFloat MenuSeparatorHeight = 9;
+static const CGFloat SettingsRowHeight = 26;
 
 #pragma mark - Palette
 
@@ -333,6 +339,177 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 }
 @end
 
+// Hamburger dropdown drawn inside the panel: compact monospace rows, a 1px border, the
+// selected row marked like list selection. Hover selects; click or Return activates.
+@interface TickerMenuView : TickerFlippedView
+@property NSArray<NSDictionary *> *items;
+@property NSInteger selectedIndex;
+@property (copy) void (^activateHandler)(NSInteger index);
++ (CGFloat)heightForItems:(NSArray<NSDictionary *> *)items;
+@end
+
+@implementation TickerMenuView
++ (CGFloat)heightForItems:(NSArray<NSDictionary *> *)items {
+    CGFloat height = 8;
+    for (NSDictionary *item in items) height += MenuRowHeight + ([item[@"separator"] boolValue] ? MenuSeparatorHeight : 0);
+    return height;
+}
+
+- (NSRect)rectForIndex:(NSInteger)index {
+    CGFloat y = 4;
+    for (NSInteger i = 0; i < (NSInteger)self.items.count; i++) {
+        if ([self.items[i][@"separator"] boolValue]) y += MenuSeparatorHeight;
+        if (i == index) return NSMakeRect(1, y, NSWidth(self.bounds) - 2, MenuRowHeight);
+        y += MenuRowHeight;
+    }
+    return NSZeroRect;
+}
+
+- (NSInteger)indexAtPoint:(NSPoint)point {
+    for (NSInteger i = 0; i < (NSInteger)self.items.count; i++) {
+        if (NSPointInRect(point, [self rectForIndex:i])) return i;
+    }
+    return -1;
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    for (NSTrackingArea *area in self.trackingAreas) [self removeTrackingArea:area];
+    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:self.bounds options:NSTrackingMouseMoved | NSTrackingActiveAlways | NSTrackingInVisibleRect owner:self userInfo:nil]];
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    NSInteger index = [self indexAtPoint:[self convertPoint:event.locationInWindow fromView:nil]];
+    if (index >= 0 && index != self.selectedIndex) { self.selectedIndex = index; self.needsDisplay = YES; }
+}
+- (void)mouseDown:(NSEvent *)event {}
+- (void)mouseUp:(NSEvent *)event {
+    NSInteger index = [self indexAtPoint:[self convertPoint:event.locationInWindow fromView:nil]];
+    if (index >= 0 && self.activateHandler) self.activateHandler(index);
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    for (NSInteger i = 0; i < (NSInteger)self.items.count; i++) {
+        NSDictionary *item = self.items[i];
+        NSRect row = [self rectForIndex:i];
+        if ([item[@"separator"] boolValue]) {
+            [DividerColor() setFill];
+            NSRectFillUsingOperation(NSMakeRect(8, NSMinY(row) - (MenuSeparatorHeight + 1) / 2.0, NSWidth(self.bounds) - 16, 1), NSCompositingOperationSourceOver);
+        }
+        BOOL selected = i == self.selectedIndex;
+        if (selected) {
+            [SelectedBackground() setFill];
+            NSRectFillUsingOperation(row, NSCompositingOperationSourceOver);
+            [BorderColor() setFill];
+            NSRectFillUsingOperation(NSMakeRect(NSMinX(row), NSMinY(row), 1, NSHeight(row)), NSCompositingOperationSourceOver);
+        }
+        BOOL emphasis = [item[@"emphasis"] boolValue];
+        NSDictionary *titleAttributes = @{NSFontAttributeName: TickerFont(11, NSFontWeightRegular), NSForegroundColorAttributeName: selected || emphasis ? TextBright() : TextPrimary()};
+        NSDictionary *dimAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: TextDim()};
+        NSDictionary *detailAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: emphasis ? TextBright() : TextSecondary()};
+        NSString *title = item[@"title"] ?: @"";
+        NSSize titleSize = [title sizeWithAttributes:titleAttributes];
+        CGFloat textY = NSMinY(row) + (MenuRowHeight - titleSize.height) / 2.0;
+        [title drawAtPoint:NSMakePoint(12, textY) withAttributes:titleAttributes];
+
+        CGFloat right = NSWidth(self.bounds) - 10;
+        NSString *shortcut = item[@"shortcut"];
+        if (shortcut.length > 0) {
+            NSSize size = [shortcut sizeWithAttributes:dimAttributes];
+            [shortcut drawAtPoint:NSMakePoint(right - size.width, textY + 1) withAttributes:dimAttributes];
+        }
+        right -= 30;
+        NSString *detail = item[@"detail"];
+        if (detail.length > 0) {
+            CGFloat available = right - (12 + titleSize.width + 12);
+            NSMutableParagraphStyle *style = [[NSMutableParagraphStyle alloc] init];
+            style.alignment = NSTextAlignmentRight;
+            style.lineBreakMode = NSLineBreakByTruncatingHead;
+            NSMutableDictionary *attributes = [detailAttributes mutableCopy];
+            attributes[NSParagraphStyleAttributeName] = style;
+            [detail drawInRect:NSMakeRect(right - available, textY + 1, available, 14) withAttributes:attributes];
+        }
+    }
+}
+@end
+
+// Catches clicks outside the open menu so they close it instead of reaching the list.
+@interface TickerMenuBackdrop : NSView
+@property (copy) void (^clickHandler)(void);
+@end
+
+@implementation TickerMenuBackdrop
+- (void)mouseDown:(NSEvent *)event { if (self.clickHandler) self.clickHandler(); }
+- (void)rightMouseDown:(NSEvent *)event { if (self.clickHandler) self.clickHandler(); }
+@end
+
+// Inline settings view: one row per setting with its value in a "‹ value ›" chip.
+// ↑/↓ select, ←/→ or Return change, clicking a row steps it forward.
+@interface TickerSettingsView : TickerFlippedView
+@property NSArray<NSDictionary *> *settings;
+@property NSInteger selectedIndex;
+@property (copy) void (^changeHandler)(NSInteger index, NSInteger delta);
+@end
+
+@implementation TickerSettingsView
+- (NSRect)rectForIndex:(NSInteger)index {
+    return NSMakeRect(0, 44 + index * SettingsRowHeight, NSWidth(self.bounds), SettingsRowHeight);
+}
+
+- (void)mouseDown:(NSEvent *)event {}
+- (void)mouseUp:(NSEvent *)event {
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    for (NSInteger i = 0; i < (NSInteger)self.settings.count; i++) {
+        if (!NSPointInRect(point, [self rectForIndex:i])) continue;
+        self.selectedIndex = i;
+        BOOL leftHalfOfChip = point.x < NSWidth(self.bounds) - 22 - 80;
+        if (self.changeHandler) self.changeHandler(i, leftHalfOfChip && point.x > NSWidth(self.bounds) - 22 - 160 ? -1 : 1);
+        self.needsDisplay = YES;
+        return;
+    }
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    [SectionTitle(@"Settings") drawAtPoint:NSMakePoint(22, 18)];
+    NSDictionary *labelAttributes = @{NSFontAttributeName: TickerFont(11, NSFontWeightRegular), NSForegroundColorAttributeName: TextPrimary()};
+    NSDictionary *selectedLabelAttributes = @{NSFontAttributeName: TickerFont(11, NSFontWeightRegular), NSForegroundColorAttributeName: TextBright()};
+    NSDictionary *valueAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: TextBright()};
+    NSDictionary *hintAttributes = @{NSFontAttributeName: TickerFont(9.5, NSFontWeightRegular), NSForegroundColorAttributeName: TextDim()};
+    for (NSInteger i = 0; i < (NSInteger)self.settings.count; i++) {
+        NSDictionary *setting = self.settings[i];
+        NSRect row = [self rectForIndex:i];
+        BOOL selected = i == self.selectedIndex;
+        if (selected) {
+            [SelectedBackground() setFill];
+            NSRectFillUsingOperation(row, NSCompositingOperationSourceOver);
+            [BorderColor() setFill];
+            NSRectFillUsingOperation(NSMakeRect(0, NSMinY(row), 1, NSHeight(row)), NSCompositingOperationSourceOver);
+        }
+        NSString *label = setting[@"label"] ?: @"";
+        NSSize labelSize = [label sizeWithAttributes:labelAttributes];
+        [label drawAtPoint:NSMakePoint(22, NSMinY(row) + (SettingsRowHeight - labelSize.height) / 2.0) withAttributes:selected ? selectedLabelAttributes : labelAttributes];
+
+        NSArray *options = setting[@"options"];
+        NSInteger index = [setting[@"index"] integerValue];
+        NSString *value = index >= 0 && index < (NSInteger)options.count ? options[index] : @"—";
+        NSString *chip = options.count > 1 ? [NSString stringWithFormat:@"‹ %@ ›", value] : value;
+        NSRect chipRect = NSMakeRect(NSWidth(self.bounds) - 22 - 160, NSMinY(row) + 4, 160, SettingsRowHeight - 8);
+        [(selected ? RGBA(1, 1, 1, 0.10) : RGBA(1, 1, 1, 0.05)) setFill];
+        NSRectFillUsingOperation(chipRect, NSCompositingOperationSourceOver);
+        [BorderColor() setStroke];
+        NSBezierPath *border = [NSBezierPath bezierPathWithRect:NSInsetRect(chipRect, 0.5, 0.5)];
+        border.lineWidth = 1;
+        [border stroke];
+        NSSize chipSize = [chip sizeWithAttributes:valueAttributes];
+        [chip drawAtPoint:NSMakePoint(NSMidX(chipRect) - chipSize.width / 2.0, NSMidY(chipRect) - chipSize.height / 2.0) withAttributes:valueAttributes];
+    }
+    NSString *hint = @"↑↓ select · ←→ change · esc back";
+    [hint drawAtPoint:NSMakePoint(22, NSHeight(self.bounds) - 22) withAttributes:hintAttributes];
+}
+@end
+
 @interface TickerRowView : NSTableRowView
 @property BOOL hovering;
 @end
@@ -453,6 +630,11 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 @property NSTextField *footerRight;
 @property TickerStackedBar *footerBar;
 @property TickerScanView *scanView;
+@property TickerMenuView *menuView;
+@property TickerMenuBackdrop *menuBackdrop;
+@property TickerSettingsView *settingsView;
+@property (readwrite, getter=isMenuVisible) BOOL menuVisible;
+@property (readwrite, getter=isSettingsVisible) BOOL settingsVisible;
 @property id globalMonitor;
 @property NSDate *lastResignDate;
 @property (weak) NSStatusBarButton *statusButton;
@@ -484,7 +666,7 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     panel.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
     panel.delegate = self;
     __weak typeof(self) weakSelf = self;
-    panel.cancelHandler = ^{ [weakSelf close]; };
+    panel.cancelHandler = ^{ [weakSelf cancel]; };
     panel.commandKeyHandler = ^BOOL(NSString *characters) { return [weakSelf handleCommandKey:characters]; };
     self.panel = panel;
 
@@ -511,6 +693,17 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     border.strokeColor = BorderColor();
     border.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [root addSubview:border];
+
+    self.menuBackdrop = [[TickerMenuBackdrop alloc] initWithFrame:frame];
+    self.menuBackdrop.hidden = YES;
+    self.menuBackdrop.clickHandler = ^{ [weakSelf hideMenu]; };
+    [root addSubview:self.menuBackdrop];
+    self.menuView = [[TickerMenuView alloc] initWithFrame:NSMakeRect(TickerPanelSize.width - MenuWidth - 8, ToolbarHeight - 2, MenuWidth, 100)];
+    self.menuView.fillColor = RGBA(0.125, 0.149, 0.188, 1);
+    self.menuView.strokeColor = BorderColor();
+    self.menuView.hidden = YES;
+    self.menuView.activateHandler = ^(NSInteger index) { [weakSelf activateMenuItemAtIndex:index]; };
+    [root addSubview:self.menuView];
 }
 
 - (NSButton *)toolbarButton:(NSString *)symbol tooltip:(NSString *)tooltip action:(SEL)action {
@@ -562,7 +755,7 @@ NSImage *TickerMonogramIcon(NSString *mark) {
         [self toolbarButton:@"arrow.down.to.line" tooltip:@"Update all supported tools" action:@selector(updateAllPressed:)],
         [self toolbarButton:@"doc.text" tooltip:@"Open Markdown report" action:@selector(markdownPressed:)],
         [self toolbarButton:@"curlybraces" tooltip:@"Open JSON report" action:@selector(jsonPressed:)],
-        [self toolbarButton:@"line.3.horizontal" tooltip:@"Classic menu (right-click the menu bar icon)" action:@selector(classicMenuPressed:)],
+        [self toolbarButton:@"line.3.horizontal" tooltip:@"Menu (right-click the menu bar icon)" action:@selector(menuPressed:)],
         [self toolbarButton:@"power" tooltip:@"Quit" action:@selector(quitPressed:)]
     ];
     CGFloat x = width - 12 - 18 * buttons.count - 4 * (buttons.count - 1);
@@ -640,6 +833,13 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     self.scanView.fillColor = RGBA(0.149, 0.176, 0.220, 1);
     self.scanView.hidden = YES;
     [self.root addSubview:self.scanView];
+
+    self.settingsView = [[TickerSettingsView alloc] initWithFrame:self.scanView.frame];
+    self.settingsView.fillColor = RGBA(0.149, 0.176, 0.220, 1);
+    self.settingsView.hidden = YES;
+    __weak typeof(self) weakSelf = self;
+    self.settingsView.changeHandler = ^(NSInteger index, NSInteger delta) { [weakSelf changeSettingAtIndex:index by:delta]; };
+    [self.root addSubview:self.settingsView];
 }
 
 - (void)buildFooter {
@@ -693,7 +893,7 @@ NSImage *TickerMonogramIcon(NSString *mark) {
         [self.tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:NO];
     }
 
-    NSString *label = [self isSearching] ? [NSString stringWithFormat:@"search/%@", query] : [view[@"label"] lowercaseString];
+    NSString *label = [self isSearching] ? [NSString stringWithFormat:@"search/%@", query] : (self.settingsVisible ? @"settings" : [view[@"label"] lowercaseString]);
     self.pathLabel.stringValue = [NSString stringWithFormat:@"~/cli/%@", label ?: @""];
     NSArray *columns = view[@"columns"];
     if ([self isSearching]) columns = @[@"Name ·", @"Version", @"Via", @"Source"];
@@ -714,6 +914,14 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     self.scanView.state = [scanning isKindOfClass:[NSDictionary class]] ? scanning : nil;
     self.scanView.hidden = self.scanView.state == nil || [self isSearching];
     self.scanView.needsDisplay = YES;
+
+    NSArray *settings = self.snapshot[@"settings"];
+    self.settingsView.settings = [settings isKindOfClass:[NSArray class]] ? settings : @[];
+    self.settingsView.selectedIndex = MIN(MAX(self.settingsView.selectedIndex, 0), MAX((NSInteger)self.settingsView.settings.count - 1, 0));
+    self.settingsView.hidden = !self.settingsVisible || [self isSearching];
+    self.settingsView.needsDisplay = YES;
+    if (self.settingsVisible) self.footerLeft.stringValue = [NSString stringWithFormat:@"%lu settings", (unsigned long)self.settingsView.settings.count];
+    [self layoutMenu];
 
     [self rebuildSidebar];
 }
@@ -743,7 +951,7 @@ NSImage *TickerMonogramIcon(NSString *mark) {
         NSString *count = view[@"count"] ? [view[@"count"] description] : [NSString stringWithFormat:@"%lu", (unsigned long)rows.count];
         TickerSidebarRow *row = [self sidebarRowWithLabel:view[@"label"] count:count y:y];
         row.symbol = SymbolImage(view[@"symbol"] ?: @"folder", 10);
-        row.selected = ![self isSearching] && [view[@"id"] isEqualToString:self.selectedViewId];
+        row.selected = ![self isSearching] && !self.settingsVisible && [view[@"id"] isEqualToString:self.selectedViewId];
         row.representedObject = view[@"id"];
         row.action = @selector(viewSelected:);
         [self.sidebar addSubview:row];
@@ -923,6 +1131,8 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 }
 
 - (BOOL)control:(NSControl *)control textView:(NSTextView *)textView doCommandBySelector:(SEL)commandSelector {
+    if (self.menuVisible) return [self menuCommand:commandSelector];
+    if (self.settingsVisible && ![self isSearching]) return [self settingsCommand:commandSelector];
     NSInteger selected = self.tableView.selectedRow;
     if (commandSelector == @selector(moveDown:) || commandSelector == @selector(moveUp:)) {
         NSInteger delta = commandSelector == @selector(moveDown:) ? 1 : -1;
@@ -950,9 +1160,129 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     return NO;
 }
 
+#pragma mark Menu and settings
+
+- (NSArray<NSDictionary *> *)menuItems {
+    NSArray *items = self.snapshot[@"menu"];
+    return [items isKindOfClass:[NSArray class]] ? items : @[];
+}
+
+- (void)layoutMenu {
+    self.menuView.items = [self menuItems];
+    CGFloat height = [TickerMenuView heightForItems:self.menuView.items];
+    self.menuView.frame = NSMakeRect(TickerPanelSize.width - MenuWidth - 8, ToolbarHeight - 2, MenuWidth, height);
+    self.menuView.hidden = !self.menuVisible;
+    self.menuBackdrop.hidden = !self.menuVisible;
+    self.menuView.needsDisplay = YES;
+}
+
+- (void)toggleMenu {
+    if (self.menuVisible) [self hideMenu];
+    else [self showMenu];
+}
+
+- (void)showMenu {
+    self.menuVisible = YES;
+    self.menuView.selectedIndex = 0;
+    [self reload];
+}
+
+- (void)hideMenu {
+    if (!self.menuVisible) return;
+    self.menuVisible = NO;
+    [self layoutMenu];
+}
+
+- (void)showSettings {
+    self.menuVisible = NO;
+    self.settingsVisible = YES;
+    self.searchField.stringValue = @"";
+    [self reload];
+}
+
+- (void)hideSettings {
+    if (!self.settingsVisible) return;
+    self.settingsVisible = NO;
+    [self reload];
+}
+
+// Esc peels back one layer: menu, then settings, then the panel itself.
+- (void)cancel {
+    if (self.menuVisible) [self hideMenu];
+    else if (self.settingsVisible) [self hideSettings];
+    else [self close];
+}
+
+- (void)activateMenuItemAtIndex:(NSInteger)index {
+    NSArray *items = [self menuItems];
+    if (index < 0 || index >= (NSInteger)items.count) return;
+    NSString *command = items[index][@"command"];
+    [self hideMenu];
+    if ([command isEqualToString:TickerCommandSettings]) {
+        [self showSettings];
+    } else if (command.length > 0) {
+        [self.delegate tickerPanel:self performCommand:command];
+    }
+}
+
+- (BOOL)menuCommand:(SEL)commandSelector {
+    NSInteger count = (NSInteger)self.menuView.items.count;
+    if (commandSelector == @selector(moveDown:) || commandSelector == @selector(moveUp:)) {
+        if (count == 0) return YES;
+        NSInteger delta = commandSelector == @selector(moveDown:) ? 1 : -1;
+        self.menuView.selectedIndex = (self.menuView.selectedIndex + delta + count) % count;
+        self.menuView.needsDisplay = YES;
+        return YES;
+    }
+    if (commandSelector == @selector(insertNewline:)) {
+        [self activateMenuItemAtIndex:self.menuView.selectedIndex];
+        return YES;
+    }
+    if (commandSelector == @selector(cancelOperation:)) {
+        [self hideMenu];
+        return YES;
+    }
+    return NO;
+}
+
+- (BOOL)settingsCommand:(SEL)commandSelector {
+    NSInteger count = (NSInteger)self.settingsView.settings.count;
+    if (commandSelector == @selector(moveDown:) || commandSelector == @selector(moveUp:)) {
+        if (count == 0) return YES;
+        NSInteger delta = commandSelector == @selector(moveDown:) ? 1 : -1;
+        self.settingsView.selectedIndex = MAX(0, MIN(count - 1, self.settingsView.selectedIndex + delta));
+        self.settingsView.needsDisplay = YES;
+        return YES;
+    }
+    if (commandSelector == @selector(moveLeft:) || commandSelector == @selector(moveRight:) || commandSelector == @selector(insertNewline:)) {
+        [self changeSettingAtIndex:self.settingsView.selectedIndex by:commandSelector == @selector(moveLeft:) ? -1 : 1];
+        return YES;
+    }
+    if (commandSelector == @selector(cancelOperation:)) {
+        [self hideSettings];
+        return YES;
+    }
+    return NO;
+}
+
+- (void)changeSettingAtIndex:(NSInteger)index by:(NSInteger)delta {
+    NSArray *settings = self.settingsView.settings;
+    if (index < 0 || index >= (NSInteger)settings.count) return;
+    NSDictionary *setting = settings[index];
+    NSArray *options = setting[@"options"];
+    if (options.count < 2) return;
+    NSInteger next = ([setting[@"index"] integerValue] + delta + (NSInteger)options.count) % (NSInteger)options.count;
+    if ([self.delegate respondsToSelector:@selector(tickerPanel:changeSetting:toOption:)]) {
+        [self.delegate tickerPanel:self changeSetting:setting[@"id"] toOption:options[next]];
+    }
+    [self reload];
+}
+
 #pragma mark Actions
 
 - (void)viewSelected:(TickerSidebarRow *)sender {
+    self.settingsVisible = NO;
+    self.menuVisible = NO;
     self.selectedViewId = sender.representedObject;
     self.searchField.stringValue = @"";
     [self.tableView deselectAll:nil];
@@ -970,6 +1300,8 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     if ([characters isEqualToString:@"u"]) { [self updateAllPressed:nil]; return YES; }
     if ([characters isEqualToString:@"q"]) { [self quitPressed:nil]; return YES; }
     if ([characters isEqualToString:@"f"]) { [self.panel makeFirstResponder:self.searchField]; return YES; }
+    if ([characters isEqualToString:@","]) { [self showSettings]; return YES; }
+    if ([characters isEqualToString:@"o"]) { [self markdownPressed:nil]; return YES; }
     return NO;
 }
 
@@ -977,7 +1309,7 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 - (void)updateAllPressed:(id)sender { [self.delegate tickerPanel:self performCommand:TickerCommandUpdateAll]; }
 - (void)markdownPressed:(id)sender { [self.delegate tickerPanel:self performCommand:TickerCommandMarkdownReport]; }
 - (void)jsonPressed:(id)sender { [self.delegate tickerPanel:self performCommand:TickerCommandJSONReport]; }
-- (void)classicMenuPressed:(id)sender { [self.delegate tickerPanel:self performCommand:TickerCommandClassicMenu]; }
+- (void)menuPressed:(id)sender { [self toggleMenu]; }
 - (void)quitPressed:(id)sender { [self.delegate tickerPanel:self performCommand:TickerCommandQuit]; }
 
 #pragma mark Window
@@ -1019,7 +1351,19 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     }
 }
 
+- (void)showMenuRelativeToStatusButton:(NSStatusBarButton *)button {
+    if (self.panel.isVisible && self.menuVisible) {
+        [self close];
+        return;
+    }
+    if (!self.panel.isVisible) [self showRelativeToStatusButton:button];
+    [self showMenu];
+}
+
 - (void)close {
+    self.menuVisible = NO;
+    self.settingsVisible = NO;
+    [self layoutMenu];
     if (self.globalMonitor) {
         [NSEvent removeMonitor:self.globalMonitor];
         self.globalMonitor = nil;
