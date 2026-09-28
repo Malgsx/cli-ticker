@@ -169,7 +169,7 @@ checkout_root() {
   local dir
   dir="$(pwd)"
   while true; do
-    if [[ -f "$dir/bin/cli" ]] && grep -q cli-ticker-command "$dir/bin/cli" 2>/dev/null \
+    if [[ -f "$dir/bin/cli" ]] && grep -a -q cli-ticker-command "$dir/bin/cli" 2>/dev/null \
       && git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       printf '%s\n' "$dir"
       return 0
@@ -192,25 +192,26 @@ update_from_checkout() {
     exit 1
   }
   echo "Pulling the latest source in $root"
-  # Git 2.55 can exit 1 from `git pull` after it has already moved the
-  # upstream ref and before it fast-forwards the worktree. If that tip
-  # moved and HEAD can still fast-forward onto it, finish the merge.
-  local before after
-  before="$(git -C "$root" rev-parse '@{u}' 2>/dev/null || true)"
-  if [[ -z "$before" ]]; then
+  # `git pull --ff-only` is fetch plus a fast-forward. Git 2.55 can
+  # return 1 from fetch after it has already moved the upstream ref, and
+  # pull then never updates the worktree. Fetch, then fast-forward onto
+  # that tip when HEAD is still an ancestor of it.
+  if ! git -C "$root" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
     echo "error: this clone has no upstream branch to pull." >&2
     exit 1
   fi
-  if ! git -C "$root" pull --ff-only; then
-    after="$(git -C "$root" rev-parse '@{u}' 2>/dev/null || true)"
-    if [[ -n "$after" && "$before" != "$after" ]] && git -C "$root" merge-base --is-ancestor HEAD '@{u}'; then
-      if ! git -C "$root" diff --quiet HEAD '@{u}'; then
-        git -C "$root" merge --ff-only --no-edit '@{u}'
-      fi
-    else
-      echo "error: could not fast-forward $root." >&2
+  local fetch_status=0
+  git -C "$root" fetch --prune --no-tags || fetch_status=$?
+  if git -C "$root" merge-base --is-ancestor '@{u}' HEAD; then
+    if [[ "$fetch_status" -ne 0 ]]; then
+      echo "error: could not fetch updates in $root." >&2
       exit 1
     fi
+  elif git -C "$root" merge-base --is-ancestor HEAD '@{u}'; then
+    git -C "$root" merge --ff-only --no-edit '@{u}'
+  else
+    echo "error: could not fast-forward $root." >&2
+    exit 1
   fi
   echo "Reinstalling CLI from $root"
   # Tests set this so a Linux run can pull without building the macOS app.

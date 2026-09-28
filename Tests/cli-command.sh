@@ -99,27 +99,54 @@ printf 'pulled\n' >> "$pull_tmp/seed/README"
 git -C "$pull_tmp/seed" add README
 git -C "$pull_tmp/seed" commit -m pulled >/dev/null
 git -C "$pull_tmp/seed" push origin main >/dev/null
-update_err="$pull_tmp/update.err"
-if ! out="$(cd "$pull_tmp/clone" && CLI_TICKER_REINSTALL_CMD=true "$cli" update 2>"$update_err")"; then
-  echo "fast-forward update failed" >&2
-  printf '%s\n' "$out" >&2
-  cat "$update_err" >&2
-  exit 1
-fi
-if ! printf '%s\n' "$out" | grep -F -q -- "Pulling the latest source in $pull_tmp/clone" \
-  || ! printf '%s\n' "$out" | grep -F -q -- "Reinstalling CLI from $pull_tmp/clone" \
-  || ! grep -F -q -- pulled "$pull_tmp/clone/README"; then
-  echo "fast-forward update output did not match" >&2
-  printf '%s\n' "$out" >&2
-  echo "stderr:" >&2
-  cat "$update_err" >&2
-  echo "readme:" >&2
+# macOS bash 3.2 can leave a failing assignment in place under set -e, and a
+# negated successful command can abort before the error text is printed.
+# Capture the status explicitly and match the clone path with a glob so a
+# /var -> /private/var canonicalization still counts.
+set +e
+out="$(cd "$pull_tmp/clone" && CLI_TICKER_REINSTALL_CMD=true "$cli" update 2>&1)"
+status=$?
+set -e
+clone_logical="$(cd "$pull_tmp/clone" && pwd)"
+clone_physical="$(cd "$pull_tmp/clone" && pwd -P)"
+case "$status:$out" in
+  0:*"Pulling the latest source in $clone_logical"*| \
+  0:*"Pulling the latest source in $clone_physical"*) ;;
+  *)
+    echo "fast-forward update failed (status $status)" >&2
+    echo "logical $clone_logical" >&2
+    echo "physical $clone_physical" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+    ;;
+esac
+case "$out" in
+  *"Reinstalling CLI from $clone_logical"*|*"Reinstalling CLI from $clone_physical"*) ;;
+  *)
+    echo "fast-forward update did not reinstall" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+    ;;
+esac
+grep -F -q -- pulled "$pull_tmp/clone/README" || {
+  echo "fast-forward did not update the clone README" >&2
   cat "$pull_tmp/clone/README" >&2
   exit 1
-fi
+}
 mkdir -p "$pull_tmp/clone/nested"
-out="$(cd "$pull_tmp/clone/nested" && CLI_TICKER_DRY_RUN=1 "$cli" update)"
-printf '%s\n' "$out" | grep -q "dry-run: would git pull --ff-only in $pull_tmp/clone"
+set +e
+out="$(cd "$pull_tmp/clone/nested" && CLI_TICKER_DRY_RUN=1 "$cli" update 2>&1)"
+status=$?
+set -e
+case "$status:$out" in
+  0:*"dry-run: would git pull --ff-only in $clone_logical"*| \
+  0:*"dry-run: would git pull --ff-only in $clone_physical"*) ;;
+  *)
+    echo "subdirectory update did not target the clone (status $status)" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+    ;;
+esac
 rm -rf "$pull_tmp"
 
 # Command names. The owned copy is ~/.local/bin/CLI. On a case-sensitive disk,
