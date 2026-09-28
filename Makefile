@@ -1,4 +1,12 @@
+# Override any of these on the command line, e.g. `make BUNDLE_ID=com.example.cli`.
+# Changing them does not trigger a rebuild; run `make clean` first.
 APP_NAME := CLITicker
+DISPLAY_NAME := CLI
+BUNDLE_ID := local.codex.cliticker
+VERSION := 0.1.1
+# Set to a "Developer ID Application: ..." identity (or "-" for ad-hoc) to sign the bundle.
+SIGN_IDENTITY :=
+CODESIGN_FLAGS := --options runtime --timestamp
 BUILD_DIR := build
 APP_DIR := $(BUILD_DIR)/$(APP_NAME).app
 BIN := $(APP_DIR)/Contents/MacOS/$(APP_NAME)
@@ -27,15 +35,16 @@ $(BIN): Sources/CLITickerObjC/main.m $(ICON)
 	'<plist version="1.0">' \
 	'<dict>' \
 	'  <key>CFBundleExecutable</key><string>$(APP_NAME)</string>' \
-	'  <key>CFBundleIdentifier</key><string>local.codex.cliticker</string>' \
-	'  <key>CFBundleName</key><string>CLI</string>' \
+	'  <key>CFBundleIdentifier</key><string>$(BUNDLE_ID)</string>' \
+	'  <key>CFBundleName</key><string>$(DISPLAY_NAME)</string>' \
 	'  <key>CFBundlePackageType</key><string>APPL</string>' \
 	'  <key>CFBundleIconFile</key><string>CLITicker</string>' \
-	'  <key>CFBundleVersion</key><string>0.1.1</string>' \
-	'  <key>CFBundleShortVersionString</key><string>0.1.1</string>' \
+	'  <key>CFBundleVersion</key><string>$(VERSION)</string>' \
+	'  <key>CFBundleShortVersionString</key><string>$(VERSION)</string>' \
 	'  <key>LSUIElement</key><true/>' \
 	'</dict>' \
 	'</plist>' > "$(APP_DIR)/Contents/Info.plist"
+	if [ -n "$(SIGN_IDENTITY)" ]; then codesign --force $(CODESIGN_FLAGS) --sign "$(SIGN_IDENTITY)" "$(APP_DIR)"; fi
 
 run: all
 	open "$(APP_DIR)"

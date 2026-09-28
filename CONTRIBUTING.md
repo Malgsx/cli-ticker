@@ -5,7 +5,7 @@ CLI is intended to be easy to fork and customize.
 ## Local Setup
 
 ```sh
-git clone https://github.com/Malgsx/cli-ticker.git
+git clone https://github.com/<your-username>/cli-ticker.git
 cd cli-ticker
 make run
 ```
