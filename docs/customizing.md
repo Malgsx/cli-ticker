@@ -14,6 +14,7 @@ Requirements: macOS and the Xcode Command Line Tools (`xcode-select --install`).
 ./cli previews   # render the panel with fixture data to build/previews/*.png
 ./cli dist       # build/dist/CLITicker.app.tar.gz
 ./cli install    # build, install to ~/Applications with install.sh, and launch
+./cli update     # install the latest published release (not this checkout) and relaunch
 ./cli uninstall  # quit and remove ~/Applications/CLITicker.app and its saved data
 ./cli icons      # regenerate the app icons (needs Pillow)
 ./cli clean      # remove build/

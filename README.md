@@ -6,7 +6,19 @@
 curl -fsSL https://raw.githubusercontent.com/Malgsx/cli-ticker/main/install.sh | bash
 ```
 
-This downloads the latest release into `~/Applications`, clears the Gatekeeper quarantine flag, and opens the app. Look for the new icon in your menu bar.
+This downloads the latest release into `~/Applications`, clears the Gatekeeper quarantine flag, and opens the app. Look for the new icon in your menu bar. It also installs a `cli` command.
+
+## Update
+
+After a new release is published, run this in Terminal:
+
+```sh
+cli update
+```
+
+That replaces the app with the latest release and opens it again. `cli reload` opens the copy already installed. `cli version` prints the version and says when a newer release is out.
+
+The menu bar app checks GitHub on launch and every six hours. When a release is newer than the installed app, it posts a notification and the panel footer says to run `cli update`. A push becomes that update once it is published as a release.
 
 ## What it is
 
@@ -38,6 +50,7 @@ To make it your own, click **Fork** at the top of this page, then clone your for
 ./cli run        # build, then open the app
 ./cli test       # run the unit tests
 ./cli install    # build and install to ~/Applications, then launch it
+./cli update     # install the latest published release and relaunch
 ./cli uninstall  # quit and remove the installed app and its saved data
 ./cli version    # print the version (from the VERSION file)
 ```
@@ -49,7 +62,9 @@ See [docs/customizing.md](docs/customizing.md) to add CLIs, change logos, rename
 From a clone, run `./cli uninstall`. Without a clone, paste this into Terminal:
 
 ```sh
-pkill -x CLITicker; rm -rf ~/Applications/CLITicker.app ~/Library/Application\ Support/CLITicker
+pkill -x CLITicker
+rm -rf ~/Applications/CLITicker.app ~/Library/Application\ Support/CLITicker
+if grep -q cli-ticker-command ~/.local/bin/cli 2>/dev/null; then rm -f ~/.local/bin/cli; fi
 ```
 
 ## For AI agents

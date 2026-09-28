@@ -1373,6 +1373,7 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
         if (!latest) return;
         dispatch_async(dispatch_get_main_queue(), ^{
             weakSelf.latestAppVersion = latest;
+            [weakSelf announceAppUpdateIfNeeded];
             [weakSelf reloadPanel];
         });
     }] resume];
@@ -1380,6 +1381,22 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
 
 - (BOOL)appUpdateAvailable {
     return self.latestAppVersion && [CLIRegistryService compareVersion:AppVersion() toVersion:self.latestAppVersion] == NSOrderedAscending;
+}
+
+// One notification per release. The panel footer keeps saying how to install it.
+- (void)announceAppUpdateIfNeeded {
+    if (![self appUpdateAvailable]) {
+        self.statusItem.button.toolTip = @"CLI";
+        return;
+    }
+    self.statusItem.button.toolTip = [NSString stringWithFormat:@"CLI %@ is available. Run cli update", self.latestAppVersion];
+    NSString *announced = [[NSUserDefaults standardUserDefaults] stringForKey:@"CLIAnnouncedUpdateVersion"];
+    if ([announced isEqualToString:self.latestAppVersion]) return;
+    [[NSUserDefaults standardUserDefaults] setObject:self.latestAppVersion forKey:@"CLIAnnouncedUpdateVersion"];
+    NSUserNotification *note = [[NSUserNotification alloc] init];
+    note.title = [NSString stringWithFormat:@"CLI %@ is available", self.latestAppVersion];
+    note.informativeText = @"Run cli update in Terminal.";
+    [[NSUserNotificationCenter defaultUserNotificationCenter] deliverNotification:note];
 }
 
 - (void)updateApp {
@@ -1404,7 +1421,7 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
     NSDate *scanned = [[NSFileManager defaultManager] attributesOfItemAtPath:self.reportURL.path error:nil].fileModificationDate;
     NSString *scanDetail = self.refreshing ? @"scanning…" : (scanned ? [self relativeTimeForTimestamp:scanned.timeIntervalSince1970] : @"");
     NSString *versionDetail = [self appUpdateAvailable]
-        ? [NSString stringWithFormat:@"%@ · update → %@", AppVersion(), self.latestAppVersion]
+        ? [NSString stringWithFormat:@"cli update · %@", self.latestAppVersion]
         : (self.latestAppVersion ? [NSString stringWithFormat:@"%@ · latest", AppVersion()] : AppVersion());
     return @[
         @{@"command": TickerCommandUpdateAll, @"title": @"Update all", @"detail": [NSString stringWithFormat:@"%lu %@", (unsigned long)updates, updates == 1 ? @"update" : @"updates"], @"shortcut": @"⌘U", @"emphasis": @(updates > 0)},
@@ -2285,6 +2302,7 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
     if (self.firstRunScanning) return @"first launch · scanning your machine…";
     if (self.refreshing) return @"rescanning in background…";
     if (self.registry.isChecking) return @"checking versions…";
+    if ([self appUpdateAvailable]) return [NSString stringWithFormat:@"CLI %@ is available · run cli update", self.latestAppVersion];
     NSDate *scanned = [[NSFileManager defaultManager] attributesOfItemAtPath:self.reportURL.path error:nil].fileModificationDate;
     NSString *when = scanned ? [self relativeTimeForTimestamp:scanned.timeIntervalSince1970] : @"never";
     return [NSString stringWithFormat:@"%lu outdated · scanned %@", [self countWithStatus:StatusOutdated], when];
