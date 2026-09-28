@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# cli-ticker-command
+# Updates and relaunches the CLI menu bar app. Installed by install.sh as `cli`.
+#   cli update    install the latest GitHub release and open the app
+#   cli reload    open the app that is already installed
+#   cli version   print the installed version, and say when a newer release exists
+set -euo pipefail
+
+REPO="${CLI_TICKER_REPO:-Malgsx/cli-ticker}"
+APP_NAME="CLITicker"
+INSTALL_DIR="${CLI_TICKER_INSTALL_DIR:-$HOME/Applications}"
+APP_PATH="$INSTALL_DIR/$APP_NAME.app"
+
+usage() {
+  cat <<'EOF'
+Usage: cli <command>
+
+  update     Install the latest release and open the app
+  reload     Open the installed app
+  version    Print the installed version
+
+A new release is published on GitHub. `cli update` installs that release.
+EOF
+}
+
+# True when $1 is a newer dotted version than $2.
+version_gt() {
+  local IFS=.
+  local i
+  # shellcheck disable=SC2206
+  local a=($1) b=($2)
+  local n=${#a[@]}
+  [[ ${#b[@]} -gt $n ]] && n=${#b[@]}
+  for ((i = 0; i < n; i++)); do
+    local ai=${a[i]:-0} bi=${b[i]:-0}
+    ai=${ai%%[^0-9]*}
+    bi=${bi%%[^0-9]*}
+    [[ -z "$ai" ]] && ai=0
+    [[ -z "$bi" ]] && bi=0
+    if ((10#$ai > 10#$bi)); then return 0; fi
+    if ((10#$ai < 10#$bi)); then return 1; fi
+  done
+  return 1
+}
+
+installed_version() {
+  if [[ -n "${CLI_TICKER_INSTALLED_VERSION+x}" ]]; then
+    printf '%s\n' "${CLI_TICKER_INSTALLED_VERSION#v}"
+    return 0
+  fi
+  local plist="$APP_PATH/Contents/Info.plist"
+  [[ -f "$plist" ]] || return 1
+  local version
+  version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist" 2>/dev/null || true)"
+  [[ -n "$version" ]] || return 1
+  printf '%s\n' "${version#v}"
+}
+
+latest_version() {
+  if [[ -n "${CLI_TICKER_LATEST_VERSION+x}" ]]; then
+    printf '%s\n' "${CLI_TICKER_LATEST_VERSION#v}"
+    return 0
+  fi
+  local body tag
+  body="$(curl -fsSL -H "Accept: application/vnd.github+json" -H "User-Agent: CLITicker" \
+    "https://api.github.com/repos/${REPO}/releases/latest")" || return 1
+  tag="$(printf '%s\n' "$body" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -n 1)"
+  [[ -n "$tag" ]] || return 1
+  printf '%s\n' "$tag"
+}
+
+reload_app() {
+  if [[ -n "${CLI_TICKER_DRY_RUN:-}" ]]; then
+    echo "dry-run: would relaunch $APP_PATH"
+    return 0
+  fi
+  [[ -d "$APP_PATH" ]] || {
+    echo "error: CLI is not installed at $APP_PATH. Run cli update." >&2
+    exit 1
+  }
+  open "$APP_PATH"
+  echo "CLI is running. Look for its icon in the menu bar."
+}
+
+install_latest() {
+  local latest="$1"
+  if [[ -n "${CLI_TICKER_DRY_RUN:-}" ]]; then
+    echo "dry-run: would install $latest"
+    return 0
+  fi
+  curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/install.sh" | CLI_TICKER_REPO="$REPO" bash
+}
+
+command="${1:-version}"
+case "$command" in
+  -h|--help|help) usage; exit 0 ;;
+  version)
+    installed="$(installed_version || true)"
+    if [[ -z "$installed" ]]; then
+      echo "CLI is not installed. Run cli update." >&2
+      exit 1
+    fi
+    echo "CLI $installed"
+    latest="$(latest_version || true)"
+    if [[ -n "$latest" ]] && version_gt "$latest" "$installed"; then
+      echo "CLI $latest is available. Run cli update."
+    fi
+    ;;
+  reload) reload_app ;;
+  update)
+    latest="$(latest_version)" || {
+      echo "error: could not read the latest CLI release." >&2
+      exit 1
+    }
+    installed="$(installed_version || true)"
+    if [[ -n "$installed" ]] && ! version_gt "$latest" "$installed"; then
+      echo "CLI $installed is up to date (latest release is $latest)."
+      reload_app
+      exit 0
+    fi
+    if [[ -n "$installed" ]]; then
+      echo "Updating CLI $installed to $latest."
+    else
+      echo "Updating CLI to $latest."
+    fi
+    install_latest "$latest"
+    ;;
+  *)
+    echo "Unknown command: $command" >&2
+    usage >&2
+    exit 1
+    ;;
+esac

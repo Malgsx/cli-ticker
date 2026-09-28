@@ -13,7 +13,9 @@ jobs:
       - name: Install icon dependency
         run: python3 -m pip install --break-system-packages pillow
       - name: Run tests
-        run: ./cli test
+        run: |
+          ./cli test
+          bash Tests/cli-command.sh
       - name: Build app
         run: ./cli build
       - name: Registry icons are build inputs
@@ -49,7 +51,7 @@ jobs:
       - name: ./cli lists every command
         run: |
           ./cli help
-          for c in build run test previews dist install uninstall icons clean version help; do
+          for c in build run test previews dist install update uninstall icons clean version help; do
             ./cli help | grep -qE "^  $c " || { echo "./cli help is missing $c" >&2; exit 1; }
           done
           if ./cli nope 2>/dev/null; then echo "unknown commands should fail" >&2; exit 1; fi
@@ -231,6 +233,8 @@ jobs:
           test -n "$cmd" || { echo "README install one-liner not found" >&2; exit 1; }
           if [ "$GITHUB_REF" != "refs/heads/main" ]; then
             cmd="${cmd/Malgsx\/cli-ticker\/main\//$SRC_REPO/$SHA/}"
+            # The piped installer downloads bin/cli from main unless this points at the commit under test.
+            export CLI_TICKER_COMMAND_URL="https://raw.githubusercontent.com/$SRC_REPO/$SHA/bin/cli"
           fi
           test ! -e ~/Applications/CLITicker.app
           cd "$RUNNER_TEMP"
@@ -251,6 +255,16 @@ jobs:
           sleep 10
           kill -0 "$pid" || { echo "CLITicker exited early" >&2; exit 1; }
           echo "CLITicker $installed launched from $app and is still running."
+          test -x "$HOME/.local/bin/cli"
+          grep -q cli-ticker-command "$HOME/.local/bin/cli"
+          version_out="$("$HOME/.local/bin/cli" version)"
+          printf '%s\n' "$version_out" | grep -qx "CLI $installed"
+          if printf '%s\n' "$version_out" | grep -q "available"; then
+            echo "cli version reported an update for the release it just installed" >&2
+            printf '%s\n' "$version_out" >&2
+            exit 1
+          fi
+          echo "cli version: $version_out"
 
   readme-build-from-source:
     runs-on: macos-latest

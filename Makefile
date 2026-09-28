@@ -89,6 +89,10 @@ install: dist
 uninstall:
 	pkill -x "$(APP_NAME)" || true
 	rm -rf "$(INSTALL_DIR)/$(APP_NAME).app" "$(HOME)/Library/Application Support/$(APP_NAME)"
+	if [ -L /usr/local/bin/cli ] && [ "$$(readlink /usr/local/bin/cli)" = "$(HOME)/.local/bin/cli" ]; then rm -f /usr/local/bin/cli; fi
+	if [ -L /opt/homebrew/bin/cli ] && [ "$$(readlink /opt/homebrew/bin/cli)" = "$(HOME)/.local/bin/cli" ]; then rm -f /opt/homebrew/bin/cli; fi
+	if grep -q cli-ticker-command "$(HOME)/.local/bin/cli" 2>/dev/null; then rm -f "$(HOME)/.local/bin/cli"; fi
+	if [ -f "$(HOME)/.zshrc" ] && grep -q cli-ticker-command "$(HOME)/.zshrc"; then grep -v cli-ticker-command "$(HOME)/.zshrc" > "$(HOME)/.zshrc.cli-ticker" && mv "$(HOME)/.zshrc.cli-ticker" "$(HOME)/.zshrc"; fi
 
 clean:
 	rm -rf "$(BUILD_DIR)"

@@ -45,6 +45,65 @@ xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist" 2>/dev/null || echo unknown)"
 echo "Installed CLI $version to $APP_PATH"
 
+# `cli update` is the user-facing command, like `claude update`. The script lives in
+# the repo as bin/cli; a piped installer downloads that same file.
+install_cli_command() {
+  local dest="${CLI_TICKER_BIN_DIR:-$HOME/.local/bin}/cli"
+  local src=""
+  if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+    local here
+    here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -f "$here/bin/cli" ]]; then src="$here/bin/cli"; fi
+  fi
+  mkdir -p "$(dirname "$dest")"
+  if [[ -e "$dest" ]] && ! grep -q cli-ticker-command "$dest" 2>/dev/null; then
+    echo "warning: $dest already exists and is not the CLI command, so it was left alone." >&2
+    echo "Move that file, run this installer again, and then use cli update." >&2
+    return 0
+  fi
+  if [[ -n "$src" ]]; then
+    cp "$src" "$dest"
+  else
+    local url="${CLI_TICKER_COMMAND_URL:-https://raw.githubusercontent.com/${REPO}/main/bin/cli}"
+    echo "Downloading $url"
+    curl -fsSL "$url" -o "$dest" || fail "could not download the cli command."
+  fi
+  chmod +x "$dest"
+
+  local linked=""
+  local dir
+  for dir in /usr/local/bin /opt/homebrew/bin; do
+    [[ -d "$dir" && -w "$dir" ]] || continue
+    local link="$dir/cli"
+    if [[ -L "$link" ]]; then
+      local target
+      target="$(readlink "$link")"
+      # Replace only a link we created. Leave someone else's `cli` alone.
+      if [[ "$target" != "$dest" ]] && ! grep -q cli-ticker-command "$target" 2>/dev/null; then
+        continue
+      fi
+      rm -f "$link"
+    elif [[ -e "$link" ]]; then
+      continue
+    fi
+    ln -s "$dest" "$link"
+    linked="$link"
+    break
+  done
+
+  if [[ -z "$linked" ]] && ! printf '%s' ":${PATH:-}:" | grep -q ":$(dirname "$dest"):"; then
+    local rc="$HOME/.zshrc"
+    touch "$rc"
+    if ! grep -q cli-ticker-command "$rc" 2>/dev/null; then
+      printf '\nexport PATH="%s:$PATH" # cli-ticker-command\n' "$(dirname "$dest")" >> "$rc"
+    fi
+    echo "Open a new terminal, then run: cli update"
+  else
+    echo "Later, run cli update to install a newer release."
+  fi
+}
+install_cli_command
+
 if [[ "${CLI_TICKER_NO_LAUNCH:-}" != "1" ]]; then
   # Opening the app is what starts the first scan of this Mac; there is no separate step.
   first_launch=0
