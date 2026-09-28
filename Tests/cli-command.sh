@@ -112,10 +112,22 @@ expect_dir() {
   return 1
 }
 
-out="$(cd "$pull_tmp/clone" && CLI_TICKER_REINSTALL_CMD=true "$cli" update)"
+set +e
+out="$(cd "$pull_tmp/clone" && CLI_TICKER_REINSTALL_CMD=true "$cli" update 2>&1)"
+status=$?
+set -e
+if [[ "$status" -ne 0 ]] || ! grep -q pulled "$pull_tmp/clone/README"; then
+  printf 'cli update exit %s\n%s\n' "$status" "$out" >&2
+  echo "---- README ----" >&2
+  cat "$pull_tmp/clone/README" >&2 || true
+  echo "---- git ----" >&2
+  git -C "$pull_tmp/clone" status --short --branch >&2 || true
+  git -C "$pull_tmp/clone" log --oneline --decorate -5 >&2 || true
+  git --version >&2 || true
+  exit 1
+fi
 expect_dir "$out" "Pulling the latest source in " "$pull_tmp/clone"
 expect_dir "$out" "Reinstalling CLI from " "$pull_tmp/clone"
-grep -q pulled "$pull_tmp/clone/README"
 mkdir -p "$pull_tmp/clone/nested"
 out="$(cd "$pull_tmp/clone/nested" && CLI_TICKER_DRY_RUN=1 "$cli" update)"
 expect_dir "$out" "dry-run: would git pull --ff-only in " "$pull_tmp/clone"
