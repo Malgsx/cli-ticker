@@ -419,11 +419,11 @@ static NSImage *AgentIcon(NSString *canonicalName) {
     return image;
 }
 
-static NSString *EscapedAppleScriptString(NSString *string) {
-    NSMutableString *escaped = [string mutableCopy];
+static NSString *YAMLDoubleQuoted(NSString *value) {
+    NSMutableString *escaped = [value mutableCopy] ?: [NSMutableString string];
     [escaped replaceOccurrencesOfString:@"\\" withString:@"\\\\" options:0 range:NSMakeRange(0, escaped.length)];
     [escaped replaceOccurrencesOfString:@"\"" withString:@"\\\"" options:0 range:NSMakeRange(0, escaped.length)];
-    return escaped;
+    return [NSString stringWithFormat:@"\"%@\"", escaped];
 }
 
 static NSString *ShellSingleQuoteEscaped(NSString *string) {
@@ -485,7 +485,9 @@ static NSString *ShellCommandForUpdateAction(NSDictionary *action) {
 static BOOL ApplicationInstalled(NSArray<NSString *> *appNames) {
     NSArray<NSString *> *roots = @[
         @"/Applications",
-        [NSHomeDirectory() stringByAppendingPathComponent:@"Applications"]
+        [NSHomeDirectory() stringByAppendingPathComponent:@"Applications"],
+        @"/System/Applications",
+        @"/System/Applications/Utilities"
     ];
     for (NSString *root in roots) {
         for (NSString *name in appNames) {
@@ -495,27 +497,165 @@ static BOOL ApplicationInstalled(NSArray<NSString *> *appNames) {
     return NO;
 }
 
-// Optional terminals in preference order; Terminal.app is always available as the fallback.
-static NSArray<NSDictionary *> *TerminalCandidates(void) {
+// Terminal.app is always the fallback. Every other entry is launched by bundle id
+// so a click cannot open a different app that happens to share a display name.
+static NSArray<NSDictionary *> *TerminalCatalog(void) {
     return @[
-        @{@"name": @"Ghostty", @"apps": @[@"Ghostty.app"]},
-        @{@"name": @"iTerm", @"apps": @[@"iTerm.app", @"iTerm2.app"]},
-        @{@"name": @"Warp", @"apps": @[@"Warp.app"]}
+        @{@"name": @"Terminal", @"applicationName": @"Terminal", @"bundleIdentifier": @"com.apple.Terminal", @"apps": @[@"Terminal.app", @"Utilities/Terminal.app"]},
+        @{@"name": @"Ghostty", @"applicationName": @"Ghostty", @"bundleIdentifier": @"com.mitchellh.ghostty", @"apps": @[@"Ghostty.app"]},
+        @{@"name": @"iTerm", @"applicationName": @"iTerm", @"bundleIdentifier": @"com.googlecode.iterm2", @"apps": @[@"iTerm.app", @"iTerm2.app"]},
+        @{@"name": @"Warp", @"applicationName": @"Warp", @"bundleIdentifier": @"dev.warp.Warp-Stable", @"alternateBundleIdentifier": @"dev.warp.Warp-Preview", @"apps": @[@"Warp.app", @"WarpPreview.app"]},
+        @{@"name": @"Alacritty", @"applicationName": @"Alacritty", @"bundleIdentifier": @"org.alacritty", @"apps": @[@"Alacritty.app"]}
     ];
 }
 
-static BOOL TerminalInstalled(NSString *terminalName) {
-    for (NSDictionary *terminal in TerminalCandidates()) {
-        if ([terminal[@"name"] isEqualToString:terminalName]) return ApplicationInstalled(terminal[@"apps"]);
+static NSDictionary *TerminalSpecNamed(NSString *name) {
+    for (NSDictionary *spec in TerminalCatalog()) {
+        if ([spec[@"name"] isEqualToString:name]) return spec;
     }
-    return NO;
+    return nil;
+}
+
+static BOOL BundleIdentifierIsInstalled(NSString *bundleIdentifier) {
+    if (bundleIdentifier.length == 0) return NO;
+    return [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:bundleIdentifier] != nil;
+}
+
+static BOOL TerminalInstalled(NSString *terminalName) {
+    if ([terminalName isEqualToString:@"Terminal"]) return YES;
+    NSDictionary *spec = TerminalSpecNamed(terminalName);
+    if (!spec) return NO;
+    if (BundleIdentifierIsInstalled(spec[@"bundleIdentifier"])) return YES;
+    if (BundleIdentifierIsInstalled(spec[@"alternateBundleIdentifier"])) return YES;
+    return ApplicationInstalled(spec[@"apps"]);
 }
 
 static NSString *DefaultTerminalName(void) {
-    for (NSDictionary *terminal in TerminalCandidates()) {
-        if (ApplicationInstalled(terminal[@"apps"])) return terminal[@"name"];
+    for (NSDictionary *spec in TerminalCatalog()) {
+        if ([spec[@"name"] isEqualToString:@"Terminal"]) continue;
+        if (TerminalInstalled(spec[@"name"])) return spec[@"name"];
     }
     return @"Terminal";
+}
+
+static NSArray<NSString *> *OsascriptArguments(NSArray<NSString *> *lines, NSString *command) {
+    NSMutableArray *arguments = [NSMutableArray arrayWithObjects:@"-e", @"on run argv", nil];
+    for (NSString *line in lines) {
+        [arguments addObject:@"-e"];
+        [arguments addObject:line];
+    }
+    [arguments addObject:@"-e"];
+    [arguments addObject:@"end run"];
+    [arguments addObject:@"--"];
+    [arguments addObject:command ?: @""];
+    return arguments;
+}
+
+// Warp reads this from ~/.warp/launch_configurations and runs `exec` in the new tab.
+// A block scalar keeps quotes in the CLI command from breaking the YAML.
+static NSString *WarpLaunchConfiguration(NSString *command) {
+    NSString *normalized = [[command ?: @"" stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"] stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+    if ([normalized hasSuffix:@"\n"]) normalized = [normalized substringToIndex:normalized.length - 1];
+    NSString *indented = [normalized stringByReplacingOccurrencesOfString:@"\n" withString:@"\n                "];
+    return [NSString stringWithFormat:
+        @"---\n"
+        "name: CLI\n"
+        "windows:\n"
+        "  - tabs:\n"
+        "      - title: CLI\n"
+        "        layout:\n"
+        "          cwd: %@\n"
+        "          commands:\n"
+        "            - exec: |\n"
+        "                %@\n",
+        YAMLDoubleQuoted(NSHomeDirectory() ?: @"/"), indented];
+}
+
+// The process launch that opens `command` in `terminal`. `arguments` always include
+// the bundle id, so the request cannot be aimed at a different app.
+static NSDictionary *TerminalLaunchRequest(NSString *terminal, NSString *command) {
+    NSDictionary *spec = TerminalSpecNamed(terminal) ?: TerminalSpecNamed(@"Terminal");
+    NSString *name = spec[@"name"];
+    NSString *bundleID = spec[@"bundleIdentifier"];
+    NSString *safeCommand = command ?: @"";
+    NSString *tell = [NSString stringWithFormat:@"tell application id \"%@\"", bundleID];
+    NSArray<NSString *> *lines = nil;
+
+    if ([name isEqualToString:@"Alacritty"]) {
+        return @{
+            @"terminal": name,
+            @"applicationName": spec[@"applicationName"],
+            @"bundleIdentifier": bundleID,
+            @"executable": @"/usr/bin/open",
+            @"arguments": @[@"-n", @"-b", bundleID, @"--args", @"-e", @"/bin/zsh", @"-lc", safeCommand],
+            @"command": safeCommand
+        };
+    }
+    if ([name isEqualToString:@"Warp"]) {
+        return @{
+            @"terminal": name,
+            @"applicationName": spec[@"applicationName"],
+            @"bundleIdentifier": bundleID,
+            @"executable": @"/usr/bin/open",
+            @"arguments": @[@"-b", bundleID, @"warp://launch/cli-ticker-launch"],
+            @"command": safeCommand,
+            @"configuration": WarpLaunchConfiguration(safeCommand)
+        };
+    }
+    if ([name isEqualToString:@"Ghostty"]) {
+        lines = @[
+            tell,
+            @"activate",
+            @"set cliTickerConfig to new surface configuration",
+            @"set initial input of cliTickerConfig to (item 1 of argv & linefeed)",
+            @"new window with configuration cliTickerConfig",
+            @"end tell"
+        ];
+    } else if ([name isEqualToString:@"iTerm"]) {
+        lines = @[
+            tell,
+            @"activate",
+            @"create window with default profile command (item 1 of argv)",
+            @"end tell"
+        ];
+    } else {
+        lines = @[
+            tell,
+            @"activate",
+            @"do script (item 1 of argv)",
+            @"end tell"
+        ];
+    }
+
+    NSMutableDictionary *request = [@{
+        @"terminal": name,
+        @"applicationName": spec[@"applicationName"],
+        @"bundleIdentifier": bundleID,
+        @"executable": @"/usr/bin/osascript",
+        @"arguments": OsascriptArguments(lines, safeCommand),
+        @"command": safeCommand
+    } mutableCopy];
+    if ([name isEqualToString:@"Ghostty"]) {
+        // AppleScript needs Ghostty 1.3 and an Automation grant. Opening the bundle
+        // still runs the command when that script is declined or too old to understand it.
+        request[@"directExecutable"] = @"/usr/bin/open";
+        request[@"directArguments"] = @[@"-n", @"-b", bundleID, @"--args", @"-e", @"/bin/zsh", @"-lc", safeCommand];
+    }
+    return request;
+}
+
+// When the preferred terminal is not installed, notice is set and the launch target
+// becomes Terminal.app. Callers show notice before performing that fallback.
+static NSDictionary *TerminalOpenPlan(NSString *preferred, NSString *command, BOOL preferredInstalled) {
+    NSString *name = preferred.length > 0 ? preferred : @"Terminal";
+    BOOL known = TerminalSpecNamed(name) != nil;
+    BOOL missing = ![name isEqualToString:@"Terminal"] && (!known || !preferredInstalled);
+    NSString *target = (missing || !known) ? @"Terminal" : name;
+    NSMutableDictionary *plan = [TerminalLaunchRequest(target, command) mutableCopy];
+    plan[@"preferred"] = name;
+    plan[@"fallback"] = @(missing);
+    if (missing) plan[@"notice"] = [NSString stringWithFormat:@"%@ isn't installed. Opening Terminal instead.", name];
+    return plan;
 }
 
 // Common per-user and Homebrew bin directories where CLIs get installed.
@@ -1135,6 +1275,7 @@ static NSArray<NSMutableDictionary *> *WithoutPathDuplicates(NSArray<NSMutableDi
 @property NSURL *updateRefreshRequestURL;
 @property NSDate *lastHandledUpdateRefreshDate;
 @property NSString *preferredTerminal;
+@property (copy) NSString *terminalNotice;
 @property NSArray<NSDictionary *> *recentChanges;
 @property (assign) FSEventStreamRef installWatchStream;
 @property NSTimer *watcherRefreshTimer;
@@ -1171,56 +1312,39 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 // Tests replace this to observe a launch without starting a terminal.
 static void (^TerminalLaunchHook)(NSString *command, NSString *terminal);
 
+static NSString *WarpLaunchConfigurationPath(void) {
+    return [NSHomeDirectory() stringByAppendingPathComponent:@".warp/launch_configurations/cli-ticker-launch.yaml"];
+}
+
+static int RunLaunchRequest(NSDictionary *request) {
+    if ([request[@"configuration"] length] > 0) {
+        NSString *path = WarpLaunchConfigurationPath();
+        NSError *error = nil;
+        [[NSFileManager defaultManager] createDirectoryAtPath:path.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+        if (![request[@"configuration"] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error]) {
+            NSLog(@"Could not write Warp launch configuration: %@", error.localizedDescription);
+        }
+    }
+    NSString *executable = request[@"executable"];
+    NSArray *arguments = request[@"arguments"];
+    if (executable.length == 0 || ![arguments isKindOfClass:[NSArray class]]) return 127;
+    CommandResult *result = RunCommandWithTimeout(executable, arguments, 120);
+    if (result.timedOut || result.launchError.length > 0) return 127;
+    return result.terminationStatus;
+}
+
+// Launches exactly the named terminal. A missing preferred app is decided earlier,
+// after the panel has been told, and arrives here already rewritten to Terminal.
 static void PerformTerminalLaunch(NSString *command, NSString *terminal) {
-    if ([terminal isEqualToString:@"Ghostty"] && TerminalInstalled(terminal)) {
-        RunCommand(@"/usr/bin/osascript", @[
-            @"-e", @"on run argv",
-            @"-e", @"tell application \"Ghostty\"",
-            @"-e", @"activate",
-            @"-e", @"set cliTickerConfig to new surface configuration",
-            @"-e", @"set initial input of cliTickerConfig to item 1 of argv & return",
-            @"-e", @"new window with configuration cliTickerConfig",
-            @"-e", @"end tell",
-            @"-e", @"end run",
-            @"--",
-            command
-        ]);
-        return;
+    NSDictionary *request = TerminalLaunchRequest(terminal, command);
+    int status = RunLaunchRequest(request);
+    NSArray *direct = request[@"directArguments"];
+    if (status != 0 && [direct isKindOfClass:[NSArray class]] && direct.count > 0) {
+        RunLaunchRequest(@{
+            @"executable": request[@"directExecutable"] ?: @"/usr/bin/open",
+            @"arguments": direct
+        });
     }
-
-    if ([terminal isEqualToString:@"iTerm"] && TerminalInstalled(terminal)) {
-        NSString *script = [NSString stringWithFormat:
-            @"tell application \"iTerm\"\n"
-             "activate\n"
-             "create window with default profile command \"%@\"\n"
-             "end tell",
-            EscapedAppleScriptString(command)
-        ];
-        RunCommand(@"/usr/bin/osascript", @[@"-e", script]);
-        return;
-    }
-
-    if ([terminal isEqualToString:@"Warp"] && TerminalInstalled(terminal)) {
-        RunCommand(@"/usr/bin/open", @[@"-a", @"Warp"]);
-        NSString *script = [NSString stringWithFormat:
-            @"tell application \"System Events\"\n"
-             "keystroke \"%@\"\n"
-             "key code 36\n"
-             "end tell",
-            EscapedAppleScriptString(command)
-        ];
-        RunCommand(@"/usr/bin/osascript", @[@"-e", script]);
-        return;
-    }
-
-    NSString *script = [NSString stringWithFormat:
-        @"tell application \"Terminal\"\n"
-         "activate\n"
-         "do script \"%@\"\n"
-         "end tell",
-        EscapedAppleScriptString(command)
-    ];
-    RunCommand(@"/usr/bin/osascript", @[@"-e", script]);
 }
 
 // osascript waits until the terminal accepts the script, so the launch always leaves the main queue.
@@ -1353,7 +1477,7 @@ static void DispatchGroupUpdate(NSArray<NSString *> *commands, NSString *script,
 }
 
 - (NSArray<NSDictionary *> *)panelSettings {
-    NSArray *terminals = [self availableTerminals];
+    NSArray *terminals = [self knownTerminalNames];
     NSUInteger terminalIndex = [terminals indexOfObject:self.preferredTerminal];
     NSMutableArray *intervalLabels = [NSMutableArray array];
     for (NSNumber *minutes in RefreshIntervalMinutes()) [intervalLabels addObject:RefreshIntervalLabel(minutes.integerValue)];
@@ -1436,7 +1560,7 @@ static void DispatchGroupUpdate(NSArray<NSString *> *commands, NSString *script,
     NSString *command = SelfUpdateCommand(AppRepository());
     NSAlert *confirm = [[NSAlert alloc] init];
     confirm.messageText = [NSString stringWithFormat:@"Update CLI to %@?", self.latestAppVersion];
-    confirm.informativeText = [NSString stringWithFormat:@"CLI will open %@ and run:\n\n%@", self.preferredTerminal, command];
+    confirm.informativeText = [self terminalPromptForCommand:command];
     [confirm addButtonWithTitle:@"Update"];
     [confirm addButtonWithTitle:@"Cancel"];
     [NSApp activateIgnoringOtherApps:YES];
@@ -1849,7 +1973,7 @@ static void DispatchGroupUpdate(NSArray<NSString *> *commands, NSString *script,
     if (confirm) {
         NSAlert *confirmAlert = [[NSAlert alloc] init];
         confirmAlert.messageText = [NSString stringWithFormat:@"Update %@?", item[@"name"] ?: @"this CLI"];
-        confirmAlert.informativeText = [NSString stringWithFormat:@"CLI will open %@ and run:\n\n%@", self.preferredTerminal, command];
+        confirmAlert.informativeText = [self terminalPromptForCommand:command];
         [confirmAlert addButtonWithTitle:@"Update"];
         [confirmAlert addButtonWithTitle:@"Cancel"];
         if ([confirmAlert runModal] != NSAlertFirstButtonReturn) return;
@@ -1927,7 +2051,10 @@ static void DispatchGroupUpdate(NSArray<NSString *> *commands, NSString *script,
     }
     NSUInteger supportedUpdates = [self supportedUpdateItemCount];
     NSString *title = [NSString stringWithFormat:@"Update %lu %@?", supportedUpdates, supportedUpdates == 1 ? @"tool" : @"tools"];
-    NSString *detail = [NSString stringWithFormat:@"Opens %@", self.preferredTerminal ?: @"Terminal"];
+    NSString *preferred = self.preferredTerminal.length > 0 ? self.preferredTerminal : @"Terminal";
+    NSString *detail = [self preferredTerminalIsMissing]
+        ? [NSString stringWithFormat:@"%@ isn't installed. Opens Terminal", preferred]
+        : [NSString stringWithFormat:@"Opens %@", preferred];
     [self.panel presentUpdateConfirmationWithTitle:title detail:detail commands:commands];
 }
 
@@ -2053,10 +2180,40 @@ static void DispatchGroupUpdate(NSArray<NSString *> *commands, NSString *script,
     return name.length > 0 ? name : path.lastPathComponent;
 }
 
+- (NSArray<NSString *> *)knownTerminalNames {
+    NSMutableArray *names = [NSMutableArray array];
+    for (NSDictionary *spec in TerminalCatalog()) [names addObject:spec[@"name"]];
+    return names;
+}
+
+- (BOOL)preferredTerminalIsMissing {
+    NSString *name = self.preferredTerminal.length > 0 ? self.preferredTerminal : @"Terminal";
+    if ([name isEqualToString:@"Terminal"]) return NO;
+    if (!TerminalSpecNamed(name)) return YES;
+    return !TerminalInstalled(name);
+}
+
+- (NSString *)missingPreferredTerminalNotice {
+    if (![self preferredTerminalIsMissing]) return nil;
+    return [NSString stringWithFormat:@"%@ isn't installed. Opening Terminal instead.", self.preferredTerminal];
+}
+
+- (NSString *)terminalPromptForCommand:(NSString *)command {
+    NSString *preferred = self.preferredTerminal.length > 0 ? self.preferredTerminal : @"Terminal";
+    if ([self preferredTerminalIsMissing]) {
+        return [NSString stringWithFormat:@"%@ isn't installed. CLI will open Terminal and run:\n\n%@", preferred, command];
+    }
+    return [NSString stringWithFormat:@"CLI will open %@ and run:\n\n%@", preferred, command];
+}
+
 - (NSArray<NSString *> *)availableTerminals {
-    NSMutableArray *terminals = [NSMutableArray arrayWithObject:@"Terminal"];
-    for (NSDictionary *terminal in TerminalCandidates()) {
-        if (ApplicationInstalled(terminal[@"apps"])) [terminals addObject:terminal[@"name"]];
+    NSMutableArray *terminals = [NSMutableArray array];
+    for (NSDictionary *spec in TerminalCatalog()) {
+        NSString *name = spec[@"name"];
+        if ([name isEqualToString:@"Terminal"] || TerminalInstalled(name)) [terminals addObject:name];
+    }
+    if (self.preferredTerminal.length > 0 && TerminalSpecNamed(self.preferredTerminal) && ![terminals containsObject:self.preferredTerminal]) {
+        [terminals addObject:self.preferredTerminal];
     }
     return terminals;
 }
@@ -2066,7 +2223,16 @@ static void DispatchGroupUpdate(NSArray<NSString *> *commands, NSString *script,
 }
 
 - (void)runShellCommand:(NSString *)command inTerminal:(NSString *)terminal {
-    DispatchTerminalLaunch(command, terminal);
+    NSString *preferred = terminal.length > 0 ? terminal : @"Terminal";
+    BOOL installed = [preferred isEqualToString:@"Terminal"] || TerminalInstalled(preferred);
+    NSDictionary *plan = TerminalOpenPlan(preferred, command, installed);
+    if ([plan[@"fallback"] boolValue]) {
+        self.terminalNotice = plan[@"notice"];
+        [self reloadPanel];
+    } else {
+        self.terminalNotice = nil;
+    }
+    DispatchTerminalLaunch(plan[@"command"] ?: command, plan[@"terminal"]);
 }
 
 - (NSArray<NSDictionary *> *)notableUpdateItems:(NSUInteger)limit {
@@ -2341,12 +2507,15 @@ static void DispatchGroupUpdate(NSArray<NSString *> *commands, NSString *script,
 
 - (NSString *)panelStatusLine {
     if (self.backgroundUpdateStatus.length > 0) return self.backgroundUpdateStatus;
+    if (self.terminalNotice.length > 0) return self.terminalNotice;
     NSString *active = [self.registry activeUpdateSummary];
     if (active.length > 0) return active;
     if (self.firstRunScanning) return @"first launch · scanning your machine…";
     if (self.refreshing) return @"rescanning in background…";
     if (self.registry.isChecking) return @"checking versions…";
     if ([self appUpdateAvailable]) return [NSString stringWithFormat:@"CLI %@ is available · run CLI update", self.latestAppVersion];
+    NSString *missing = [self missingPreferredTerminalNotice];
+    if (missing.length > 0) return missing;
     NSDate *scanned = [[NSFileManager defaultManager] attributesOfItemAtPath:self.reportURL.path error:nil].fileModificationDate;
     NSString *when = scanned ? [self relativeTimeForTimestamp:scanned.timeIntervalSince1970] : @"never";
     return [NSString stringWithFormat:@"%lu outdated · scanned %@", [self countWithStatus:StatusOutdated], when];
@@ -2460,7 +2629,9 @@ static void DispatchGroupUpdate(NSArray<NSString *> *commands, NSString *script,
     }
     NSString *command = row[@"openCommand"];
     if (command.length == 0) return;
-    [panel close];
+    // Keep the panel up when the saved terminal is missing so the footer can say so
+    // before Terminal.app opens.
+    if (![self preferredTerminalIsMissing]) [panel close];
     [self runInPreferredTerminal:[self terminalSessionLaunchingCommand:command label:row[@"title"] ?: @"CLI"]];
 }
 
@@ -2489,14 +2660,18 @@ static void DispatchGroupUpdate(NSArray<NSString *> *commands, NSString *script,
         }
     }
     self.backgroundUpdateKeys = keys;
-    NSString *terminal = self.preferredTerminal.length > 0 ? self.preferredTerminal : @"Terminal";
+    NSString *preferred = self.preferredTerminal.length > 0 ? self.preferredTerminal : @"Terminal";
+    NSString *script = [self updateAllTerminalCommandWithCommands:commands];
+    BOOL installed = [preferred isEqualToString:@"Terminal"] || TerminalInstalled(preferred);
+    NSDictionary *plan = TerminalOpenPlan(preferred, script, installed);
+    NSString *terminal = plan[@"terminal"] ?: @"Terminal";
+    if ([plan[@"fallback"] boolValue]) self.terminalNotice = plan[@"notice"];
     NSUInteger count = commands.count;
     self.backgroundUpdateStatus = [NSString stringWithFormat:@"Updating %lu in %@…", (unsigned long)count, terminal];
     if (self.panel.isSelecting) [self.panel setSelectMode:NO];
     [self.panel noteBackgroundUpdateStatus:self.backgroundUpdateStatus];
-    NSString *script = [self updateAllTerminalCommandWithCommands:commands];
     __weak typeof(self) weakSelf = self;
-    DispatchGroupUpdate(commands, script, terminal, ^{
+    DispatchGroupUpdate(commands, plan[@"command"] ?: script, terminal, ^{
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf || strongSelf.backgroundUpdateStatus.length == 0) return;
         strongSelf.backgroundUpdateStatus = [NSString stringWithFormat:@"%lu running in %@", (unsigned long)count, terminal];
@@ -2551,6 +2726,7 @@ static void DispatchGroupUpdate(NSArray<NSString *> *commands, NSString *script,
     if (terminal.length == 0) return;
     self.preferredTerminal = terminal;
     [[NSUserDefaults standardUserDefaults] setObject:terminal forKey:@"PreferredTerminal"];
+    self.terminalNotice = [self missingPreferredTerminalNotice];
     [self reloadPanel];
 }
 
@@ -2567,9 +2743,57 @@ static BOOL RegistryDumpSettled(BOOL *sawActivity, BOOL refreshing, BOOL checkin
 @property MenuController *menuController;
 @end
 
+// `--exercise-terminal-launch <file> <terminal> ...` writes the launch request for each
+// preferred terminal and exits. It does not open a terminal. CI compares the bundle ids.
+static BOOL RunTerminalLaunchExerciseIfRequested(void) {
+    NSArray<NSString *> *arguments = [[NSProcessInfo processInfo] arguments];
+    NSUInteger flag = [arguments indexOfObject:@"--exercise-terminal-launch"];
+    if (flag == NSNotFound || flag + 1 >= arguments.count) return NO;
+    NSString *output = arguments[flag + 1];
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (NSUInteger index = flag + 2; index < arguments.count; index++) {
+        NSString *name = arguments[index];
+        if ([name hasPrefix:@"--"]) break;
+        if (name.length > 0) [names addObject:name];
+    }
+    if (names.count == 0) {
+        fprintf(stderr, "exercise-terminal-launch: pass an output path and at least one terminal name\n");
+        exit(2);
+    }
+    NSString *command = @"/usr/bin/git --help";
+    NSMutableArray *cases = [NSMutableArray array];
+    for (NSString *name in names) {
+        if (!TerminalSpecNamed(name)) {
+            fprintf(stderr, "exercise-terminal-launch: unknown terminal %s\n", name.UTF8String);
+            exit(2);
+        }
+        NSDictionary *request = TerminalLaunchRequest(name, command);
+        NSMutableDictionary *row = [@{
+            @"preferred": name,
+            @"bundleIdentifier": request[@"bundleIdentifier"] ?: @"",
+            @"applicationName": request[@"applicationName"] ?: @"",
+            @"executable": request[@"executable"] ?: @"",
+            @"arguments": request[@"arguments"] ?: @[],
+            @"command": request[@"command"] ?: @""
+        } mutableCopy];
+        if (request[@"directArguments"]) row[@"directArguments"] = request[@"directArguments"];
+        [cases addObject:row];
+    }
+    NSString *directory = output.stringByDeletingLastPathComponent;
+    if (directory.length > 0) [[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
+    NSData *json = [NSJSONSerialization dataWithJSONObject:@{@"cases": cases} options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
+    if (![json writeToFile:output atomically:YES]) {
+        fprintf(stderr, "exercise-terminal-launch: could not write %s\n", output.UTF8String);
+        exit(1);
+    }
+    fprintf(stderr, "exercise-terminal-launch wrote %lu cases\n", (unsigned long)cases.count);
+    exit(0);
+}
+
 @implementation AppDelegate
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     if (RenderPanelPreviewsIfRequested()) return;
+    if (RunTerminalLaunchExerciseIfRequested()) return;
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     self.menuController = [[MenuController alloc] init];
     if ([[[NSProcessInfo processInfo] arguments] containsObject:@"--show"]) [self.menuController showPanel];

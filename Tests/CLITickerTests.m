@@ -527,6 +527,55 @@ static void TestTerminalLaunchDoesNotBlock(void) {
     TerminalLaunchHook = nil;
 }
 
+static void TestTerminalLaunchTargetsPreferredBundle(void) {
+    NSDictionary *expected = @{
+        @"Terminal": @"com.apple.Terminal",
+        @"Ghostty": @"com.mitchellh.ghostty",
+        @"iTerm": @"com.googlecode.iterm2",
+        @"Warp": @"dev.warp.Warp-Stable",
+        @"Alacritty": @"org.alacritty"
+    };
+    NSString *agent = ShellCommandForUpdateAction(OpenActionForCLI(@{@"id": @"claude", @"open": @[]}, @"/usr/local/bin/claude", @"claude"));
+    NSString *cli = ShellCommandForUpdateAction(OpenActionForCLI(nil, @"/usr/bin/git", @"git"));
+    Assert([agent isEqualToString:@"/usr/local/bin/claude"], @"an interactive agent command is the binary");
+    Assert([cli isEqualToString:@"/usr/bin/git --help"], @"a plain CLI command uses the registry default");
+
+    for (NSString *name in expected) {
+        NSDictionary *request = TerminalLaunchRequest(name, cli);
+        NSString *bundle = expected[name];
+        NSString *joined = [request[@"arguments"] componentsJoinedByString:@"\n"];
+        Assert([request[@"bundleIdentifier"] isEqualToString:bundle], [NSString stringWithFormat:@"%@ should launch %@", name, bundle]);
+        Assert([joined containsString:bundle], [NSString stringWithFormat:@"%@ launch arguments must name %@\n%@", name, bundle, joined]);
+        BOOL carriesCommand = [joined containsString:cli] || [request[@"configuration"] containsString:cli];
+        Assert(carriesCommand, [NSString stringWithFormat:@"%@ launch must include the CLI command", name]);
+        Assert([request[@"command"] isEqualToString:cli], @"the launch request keeps the command");
+    }
+
+    NSDictionary *ghosttyAgent = TerminalLaunchRequest(@"Ghostty", agent);
+    NSDictionary *terminalCLI = TerminalLaunchRequest(@"Terminal", cli);
+    NSString *ghosttyArgs = [ghosttyAgent[@"arguments"] componentsJoinedByString:@"\n"];
+    Assert([ghosttyAgent[@"bundleIdentifier"] isEqualToString:@"com.mitchellh.ghostty"], @"preferred Ghostty targets com.mitchellh.ghostty");
+    Assert([ghosttyArgs containsString:@"com.mitchellh.ghostty"], @"the Ghostty script addresses that bundle id");
+    Assert([ghosttyArgs containsString:agent], @"an agent row launches the agent command");
+    Assert(![ghosttyArgs containsString:@"--help"], @"an interactive agent is not opened with --help");
+    Assert([[ghosttyAgent[@"directArguments"] componentsJoinedByString:@" "] containsString:@"com.mitchellh.ghostty"], @"Ghostty's direct open still targets its bundle");
+    Assert([[ghosttyAgent[@"directArguments"] lastObject] isEqualToString:agent], @"the direct Ghostty open runs the agent command");
+    Assert([terminalCLI[@"bundleIdentifier"] isEqualToString:@"com.apple.Terminal"], @"preferred Terminal.app targets com.apple.Terminal");
+    Assert(![ghosttyAgent[@"bundleIdentifier"] isEqualToString:terminalCLI[@"bundleIdentifier"]], @"Ghostty and Terminal.app must produce different launch targets");
+
+    NSDictionary *installed = TerminalOpenPlan(@"Ghostty", agent, YES);
+    Assert(![installed[@"fallback"] boolValue] && installed[@"notice"] == nil, @"an installed preferred terminal is launched as itself");
+    Assert([installed[@"bundleIdentifier"] isEqualToString:@"com.mitchellh.ghostty"], @"installed Ghostty stays on Ghostty");
+
+    NSDictionary *missing = TerminalOpenPlan(@"Ghostty", cli, NO);
+    Assert([missing[@"fallback"] boolValue], @"a missing preferred terminal falls back");
+    Assert([missing[@"notice"] containsString:@"Ghostty isn't installed"], @"the panel is told which terminal is missing");
+    Assert([missing[@"notice"] containsString:@"Opening Terminal instead"], @"the panel says which app will open");
+    Assert([missing[@"preferred"] isEqualToString:@"Ghostty"], @"the saved preference stays Ghostty");
+    Assert([missing[@"bundleIdentifier"] isEqualToString:@"com.apple.Terminal"], @"the fallback target is Terminal.app");
+    Assert(![missing[@"bundleIdentifier"] isEqualToString:installed[@"bundleIdentifier"]], @"the fallback launch target differs from Ghostty");
+}
+
 @interface UninstallPanelSource : RowButtonPanelSource
 @property NSUInteger activations;
 @property NSUInteger uninstallRuns;
@@ -813,6 +862,7 @@ int main(int argc, const char *argv[]) {
         TestUninstallPlans();
         TestOpenCommandResolution();
         TestTerminalLaunchDoesNotBlock();
+        TestTerminalLaunchTargetsPreferredBundle();
         TestSelectModeConfirmsBeforeUninstall();
         TestUpdateConfirmationPaginatesTenPerPage();
         TestGroupUpdateDoesNotBlock();
