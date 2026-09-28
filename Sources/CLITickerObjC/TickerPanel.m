@@ -108,7 +108,8 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 - (void)drawRect:(NSRect)dirtyRect {
     if (self.fillColor) {
         [self.fillColor setFill];
-        NSRectFillUsingOperation(dirtyRect, NSCompositingOperationSourceOver);
+        // Offscreen caching can pass a dirty rect larger than the view without clipping to it.
+        NSRectFillUsingOperation(NSIntersectionRect(dirtyRect, self.bounds), NSCompositingOperationSourceOver);
     }
     if (self.strokeColor) {
         // Drawn rather than a layer border so cacheDisplayInRect previews include it.

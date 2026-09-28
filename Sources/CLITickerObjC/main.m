@@ -572,12 +572,17 @@ static NSSet<NSString *> *DirectorySources(void) {
 // Unlisted executables whose name marks them as an AI agent (`acme-agent`, `llm`, `gpt-cli`).
 static BOOL LooksLikeAgentName(NSString *name) {
     static NSSet<NSString *> *tokens;
+    static NSSet<NSString *> *daemonPrefixes;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         tokens = [NSSet setWithArray:@[@"agent", @"agents", @"ai", @"llm", @"gpt", @"copilot", @"coder", @"claude", @"codex", @"gemini"]];
+        // Key and credential agents (gpg-agent, ssh-agent, ...) are not AI agents.
+        daemonPrefixes = [NSSet setWithArray:@[@"gpg", @"ssh", @"keybase", @"1password", @"op", @"pageant", @"yubikey", @"secretive", @"kube", @"datadog", @"newrelic", @"zabbix"]];
     });
     NSCharacterSet *separators = [NSCharacterSet characterSetWithCharactersInString:@"-_./@"];
-    for (NSString *token in [name.lowercaseString componentsSeparatedByCharactersInSet:separators]) {
+    NSArray<NSString *> *parts = [name.lowercaseString componentsSeparatedByCharactersInSet:separators];
+    if ([daemonPrefixes containsObject:parts.firstObject ?: @""]) return NO;
+    for (NSString *token in parts) {
         if ([tokens containsObject:token]) return YES;
     }
     return NO;

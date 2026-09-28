@@ -185,7 +185,7 @@ static void TestAgentNameHeuristic(void) {
     for (NSString *name in @[@"acme-agent", @"llm", @"gpt-cli", @"my_ai_tool", @"@corp/claude-helper", @"codex-mini"]) {
         Assert(LooksLikeAgentName(name), [NSString stringWithFormat:@"%@ should look like an agent", name]);
     }
-    for (NSString *name in @[@"git", @"tree", @"agentic", @"mail", @"brain", @"jq"]) {
+    for (NSString *name in @[@"git", @"tree", @"agentic", @"mail", @"brain", @"jq", @"gpg-agent", @"gpg-connect-agent", @"ssh-agent"]) {
         Assert(!LooksLikeAgentName(name), [NSString stringWithFormat:@"%@ should not look like an agent", name]);
     }
 }

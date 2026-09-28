@@ -127,6 +127,7 @@ jobs:
           agents = {a["title"]: a for a in summary["agents"]}
           assert "Codex" in agents, "Codex should be in the Agents view"
           assert agents.get("acme-agent", {}).get("generic") is True, "acme-agent should be shown as a generic agent"
+          assert not any(t.startswith(("gpg", "ssh")) for t in agents), f"key agents listed as AI agents: {list(agents)}"
           others = {o["title"] for o in summary["otherCLIs"]}
           assert {"tree", "pycowsay"} <= others, f"unregistered CLIs missing from the CLIs view: {others}"
           PY
