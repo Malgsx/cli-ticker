@@ -719,7 +719,7 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 @end
 
 @interface TickerUninstallSheet : TickerFlippedView
-@property NSArray<NSDictionary *> *plans;
+@property (nonatomic, copy) NSArray<NSDictionary *> *plans;
 @property BOOL running;
 @property BOOL finished;
 @property TickerChipButton *cancelButton;

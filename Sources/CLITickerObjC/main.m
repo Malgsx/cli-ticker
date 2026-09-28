@@ -734,7 +734,8 @@ static NSString *OpenExecutableForRow(NSDictionary *row, NSDictionary *entry, NS
     if (path.length == 0 && [item[@"path"] isKindOfClass:[NSString class]]) path = item[@"path"];
     if (path.length > 0) return path;
     id bins = entry[@"bins"];
-    if ([bins isKindOfClass:[NSArray class]] && [bins.firstObject isKindOfClass:[NSString class]]) return bins.firstObject;
+    NSArray *binList = [bins isKindOfClass:[NSArray class]] ? bins : nil;
+    if ([binList.firstObject isKindOfClass:[NSString class]]) return binList.firstObject;
     if ([bins isKindOfClass:[NSString class]]) return bins;
     NSString *name = [item[@"name"] isKindOfClass:[NSString class]] ? item[@"name"] : nil;
     if (name.length == 0) return [row[@"title"] isKindOfClass:[NSString class]] ? row[@"title"] : nil;
