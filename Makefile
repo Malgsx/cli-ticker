@@ -14,6 +14,7 @@ TEST_BIN := $(BUILD_DIR)/tests/CLITickerTests
 ICON := Assets/AppIcon/CLITicker.icns
 SOURCES := $(wildcard Sources/CLITickerObjC/*.m)
 HEADERS := $(wildcard Sources/CLITickerObjC/*.h)
+REGISTRY_ASSETS := Assets/CLIRegistry/registry.json Assets/CLIRegistry/icons $(wildcard Assets/CLIRegistry/icons/*)
 
 .PHONY: all run test previews dist clean
 
@@ -23,7 +24,7 @@ $(ICON): scripts/generate_icon_assets.py
 	python3 scripts/generate_icon_assets.py
 	iconutil -c icns Assets/AppIcon/CLITicker.iconset -o "$(ICON)"
 
-$(BIN): $(SOURCES) $(HEADERS) $(ICON) Assets/CLIRegistry/registry.json
+$(BIN): $(SOURCES) $(HEADERS) $(ICON) $(REGISTRY_ASSETS)
 	mkdir -p "$(APP_DIR)/Contents/MacOS"
 	mkdir -p "$(APP_DIR)/Contents/Resources"
 	mkdir -p "$(APP_DIR)/Contents/Resources/Logos"
