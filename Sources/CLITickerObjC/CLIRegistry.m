@@ -16,6 +16,11 @@ static NSString *ShellQuote(NSString *value) {
     return [NSString stringWithFormat:@"'%@'", [value ?: @"" stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];
 }
 
+static NSString *DisplayWord(NSString *word) {
+    NSCharacterSet *unsafe = [[NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@+:,./_-"] invertedSet];
+    return word.length > 0 && [word rangeOfCharacterFromSet:unsafe].location == NSNotFound ? word : ShellQuote(word);
+}
+
 static NSArray<NSString *> *StringList(id value) {
     if ([value isKindOfClass:[NSString class]]) return @[value];
     if ([value isKindOfClass:[NSArray class]]) return value;
