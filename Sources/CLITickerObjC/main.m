@@ -1,5 +1,8 @@
 #import <AppKit/AppKit.h>
 #import <CoreServices/CoreServices.h>
+#import "CLIRegistry.h"
+#import "PanelPreview.h"
+#import "TickerPanel.h"
 
 static NSString *const StatusCurrent = @"current";
 static NSString *const StatusOutdated = @"outdated";
@@ -493,7 +496,12 @@ static NSString *AgentInvocationName(NSString *canonicalName) {
 @property NSAlert *allUpdatesAlert;
 @property NSArray<NSDictionary *> *searchResultItems;
 @property NSTableView *searchResultsTableView;
+@property TickerPanelController *panel;
+@property CLIRegistryService *registry;
+@property NSMenu *classicMenu;
 - (void)scheduleWatcherRefresh;
+- (void)setUpPanel;
+- (void)reloadPanel;
 @end
 
 static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
@@ -540,6 +548,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     self.recentChanges = @[];
     [self loadReport];
     [self loadRecentChanges];
+    [self setUpPanel];
     [self rebuildMenu];
     [self refresh:nil];
     [self startInstallWatcher];
@@ -1558,7 +1567,8 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     quit.target = self;
     [menu addItem:quit];
 
-    self.statusItem.menu = menu;
+    self.classicMenu = menu;
+    [self reloadPanel];
 }
 
 - (void)refresh:(id)sender {
@@ -1574,6 +1584,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
             self.refreshing = NO;
             [self rebuildMenu];
             [self reloadAllUpdatesDialog];
+            [self.registry refreshWithInventory:fresh force:NO];
         });
     });
 }
@@ -1750,6 +1761,258 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     [NSApp terminate:nil];
 }
 
+#pragma mark - Menu bar panel
+
+// Left click opens the panel; right click (or control-click) shows the classic menu.
+- (void)setUpPanel {
+    self.panel = [[TickerPanelController alloc] init];
+    self.panel.delegate = (id<TickerPanelDelegate>)self;
+    self.statusItem.button.target = self;
+    self.statusItem.button.action = @selector(statusItemClicked:);
+    [self.statusItem.button sendActionOn:NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp];
+
+    NSString *registryPath = [[NSBundle mainBundle] pathForResource:@"registry" ofType:@"json" inDirectory:@"CLIRegistry"];
+    NSString *iconDirectory = [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"CLIRegistry/icons"];
+    NSURL *cacheDirectory = self.reportURL.URLByDeletingLastPathComponent;
+    self.registry = [[CLIRegistryService alloc] initWithRegistryURL:[NSURL fileURLWithPath:registryPath ?: @""] iconDirectory:iconDirectory cacheDirectory:cacheDirectory];
+    self.registry.commandRunner = ^NSString *(NSString *launchPath, NSArray<NSString *> *arguments) {
+        return RunCommand(launchPath, arguments);
+    };
+    __weak typeof(self) weakSelf = self;
+    // Once the update-action API from PR #4 is on this branch, return
+    // UpdateActionForItem(item, [weakSelf displayNameForItem:item]) and set
+    // shellCommandForAction to ShellCommandForUpdateAction.
+    self.registry.inventoryUpdateAction = ^NSDictionary *(NSDictionary *item) {
+        NSString *command = [weakSelf updateCommandForItem:item];
+        return command.length > 0 ? @{@"script": command} : nil;
+    };
+    self.registry.changeHandler = ^{
+        [weakSelf reloadPanel];
+    };
+    self.registry.updateFinishedHandler = ^(NSDictionary *status, BOOL succeeded) {
+        if (succeeded) [weakSelf refresh:nil];
+    };
+    [self.registry refreshWithInventory:self.items force:NO];
+}
+
+- (void)statusItemClicked:(NSStatusBarButton *)sender {
+    NSEvent *event = NSApp.currentEvent;
+    BOOL secondary = event.type == NSEventTypeRightMouseUp || (event.modifierFlags & NSEventModifierFlagControl);
+    if (secondary) {
+        [self showClassicMenu];
+        return;
+    }
+    [self.panel toggleRelativeToStatusButton:sender];
+}
+
+- (void)showClassicMenu {
+    [self.panel close];
+    self.statusItem.menu = self.classicMenu;
+    [self.statusItem.button performClick:nil];
+    self.statusItem.menu = nil;
+}
+
+- (void)reloadPanel {
+    if (self.panel.isVisible) [self.panel reload];
+}
+
+- (NSString *)shortSourceName:(NSString *)source {
+    NSDictionary *names = @{@"Homebrew": @"brew", @"Homebrew Cask": @"cask", @"npm global": @"npm", @"Bun global": @"bun", @"uv tool": @"uv", @"PATH": @"path"};
+    return names[source] ?: source.lowercaseString ?: @"";
+}
+
+- (NSDictionary *)panelRowForItem:(NSDictionary *)item kind:(NSString *)kind {
+    NSString *status = item[@"status"];
+    return @{
+        @"kind": kind,
+        @"item": item,
+        @"title": [self titleNameForItem:item] ?: @"",
+        @"detail": [self versionSummaryForItem:item] ?: @"",
+        @"via": [self shortSourceName:item[@"source"] ?: @""],
+        @"meta": [status isEqualToString:StatusOutdated] ? @"update ›" : ([status isEqualToString:StatusCurrent] ? @"current" : @"—"),
+        @"emphasis": @([status isEqualToString:StatusOutdated]),
+        @"icon": [NSImage imageWithSystemSymbolName:@"terminal" accessibilityDescription:nil],
+        @"tooltip": item[@"path"] ?: item[@"source"] ?: @""
+    };
+}
+
+- (NSArray<NSDictionary *> *)panelAgentRows {
+    NSMutableArray *rows = [NSMutableArray array];
+    for (NSDictionary *item in [self agentTools]) {
+        NSMutableDictionary *row = [[self panelRowForItem:item kind:@"agent"] mutableCopy];
+        row[@"title"] = [self friendlyAgentName:[self displayNameForItem:item]];
+        row[@"icon"] = AgentIcon([self displayNameForItem:item]);
+        row[@"meta"] = [item[@"status"] isEqualToString:StatusOutdated] ? @"outdated" : @"open ›";
+        [rows addObject:row];
+    }
+    return rows;
+}
+
+- (NSArray<NSDictionary *> *)panelUpdateRows {
+    NSMutableArray *rows = [NSMutableArray array];
+    NSUInteger supported = [self allUpdateCommands].count;
+    if (supported > 0) {
+        [rows addObject:@{
+            @"kind": @"updateAll",
+            @"title": @"Update all",
+            @"detail": [NSString stringWithFormat:@"%lu %@", supported, supported == 1 ? @"command" : @"commands"],
+            @"meta": @"run ›",
+            @"emphasis": @YES,
+            @"icon": [NSImage imageWithSystemSymbolName:@"arrow.down.to.line" accessibilityDescription:nil]
+        }];
+    }
+    for (NSDictionary *item in [self notableUpdateItems:NSUIntegerMax]) {
+        NSMutableDictionary *row = [[self panelRowForItem:item kind:@"update"] mutableCopy];
+        row[@"icon"] = [NSImage imageWithSystemSymbolName:@"arrow.triangle.2.circlepath" accessibilityDescription:nil];
+        if ([self updateCommandForItem:item].length == 0) row[@"meta"] = @"manual";
+        [rows addObject:row];
+    }
+    return rows;
+}
+
+- (NSArray<NSDictionary *> *)panelRecentRows {
+    NSMutableArray *rows = [NSMutableArray array];
+    for (NSDictionary *change in [self prunedChanges:self.recentChanges]) {
+        NSDictionary *item = [self inventoryItemForChange:change];
+        NSString *previous = change[@"previousVersion"];
+        NSString *current = change[@"currentVersion"] ?: @"installed";
+        NSMutableDictionary *row = [NSMutableDictionary dictionary];
+        row[@"kind"] = @"recent";
+        if (item) row[@"item"] = item;
+        row[@"title"] = [self titleNameForItem:@{@"name": change[@"name"] ?: @""}] ?: @"";
+        row[@"detail"] = previous.length > 0 ? [NSString stringWithFormat:@"%@ → %@", previous, current] : current;
+        row[@"via"] = [self shortSourceName:change[@"source"] ?: @""];
+        row[@"meta"] = [self relativeTimeForTimestamp:[change[@"date"] doubleValue]];
+        row[@"icon"] = [NSImage imageWithSystemSymbolName:@"clock.arrow.circlepath" accessibilityDescription:nil];
+        [rows addObject:row];
+    }
+    return rows;
+}
+
+- (NSArray<NSDictionary *> *)panelAllRows {
+    NSMutableArray *rows = [NSMutableArray arrayWithCapacity:self.items.count];
+    for (NSDictionary *item in self.items) [rows addObject:[self panelRowForItem:item kind:@"cli"]];
+    return rows;
+}
+
+- (NSArray<NSDictionary *> *)panelSourceCounts {
+    NSMutableDictionary<NSString *, NSNumber *> *counts = [NSMutableDictionary dictionary];
+    for (NSDictionary *item in self.items) {
+        NSString *source = [self shortSourceName:item[@"source"] ?: @""];
+        counts[source] = @(counts[source].integerValue + 1);
+    }
+    NSMutableArray *entries = [NSMutableArray array];
+    for (NSString *source in counts) [entries addObject:@{@"label": source, @"count": counts[source]}];
+    return [entries sortedArrayUsingDescriptors:@[[NSSortDescriptor sortDescriptorWithKey:@"count" ascending:NO]]];
+}
+
+- (NSString *)panelStatusLine {
+    NSString *active = [self.registry activeUpdateSummary];
+    if (active.length > 0) return active;
+    if (self.refreshing) return @"scanning package managers…";
+    if (self.registry.isChecking) return @"checking versions…";
+    NSDate *scanned = [[NSFileManager defaultManager] attributesOfItemAtPath:self.reportURL.path error:nil].fileModificationDate;
+    NSString *when = scanned ? [self relativeTimeForTimestamp:scanned.timeIntervalSince1970] : @"never";
+    return [NSString stringWithFormat:@"%lu outdated · scanned %@", [self countWithStatus:StatusOutdated], when];
+}
+
+- (NSDictionary *)tickerPanelSnapshot:(TickerPanelController *)panel {
+    NSArray *registryRows = self.registry.statuses;
+    NSUInteger registryOutdated = 0;
+    for (NSDictionary *row in registryRows) if ([row[@"state"] isEqualToString:@"outdated"]) registryOutdated++;
+    NSArray *views = @[
+        @{@"id": @"clis", @"label": @"CLIs", @"symbol": @"square.stack.3d.up", @"rows": registryRows, @"columns": @[@"Name ·", @"Version", @"Via", @"Status"]},
+        @{@"id": @"agents", @"label": @"Agents", @"symbol": @"sparkles", @"rows": [self panelAgentRows], @"columns": @[@"Name ·", @"Version", @"Via", @"Action"]},
+        @{@"id": @"updates", @"label": @"Updates", @"symbol": @"arrow.down.circle", @"rows": [self panelUpdateRows], @"count": @([self countWithStatus:StatusOutdated]), @"columns": @[@"Name ·", @"Version", @"Via", @"Action"]},
+        @{@"id": @"recent", @"label": @"Recent", @"symbol": @"clock", @"rows": [self panelRecentRows], @"columns": @[@"Name ·", @"Change", @"Via", @"When"]},
+        @{@"id": @"all", @"label": @"All", @"symbol": @"list.bullet", @"rows": [self panelAllRows], @"columns": @[@"Name ·", @"Version", @"Via", @"Status"]}
+    ];
+    NSUInteger outdated = [self countWithStatus:StatusOutdated];
+    NSUInteger unknown = [self countWithStatus:StatusUnknown];
+    return @{
+        @"views": views,
+        @"terminals": [self availableTerminals],
+        @"preferredTerminal": self.preferredTerminal ?: @"",
+        @"sources": [self panelSourceCounts],
+        @"stats": @{@"current": @(self.items.count - outdated - unknown), @"outdated": @(outdated), @"unknown": @(unknown), @"registryOutdated": @(registryOutdated)},
+        @"status": [self panelStatusLine]
+    };
+}
+
+- (NSArray<NSDictionary *> *)tickerPanel:(TickerPanelController *)panel rowsMatching:(NSString *)query {
+    NSMutableArray *rows = [NSMutableArray array];
+    NSString *needle = [query stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]].lowercaseString;
+    for (NSDictionary *status in self.registry.statuses) {
+        if ([[status[@"title"] lowercaseString] containsString:needle] || [[status[@"id"] lowercaseString] containsString:needle]) [rows addObject:status];
+    }
+    for (NSDictionary *item in [self searchItemsMatching:query limit:50]) {
+        NSMutableDictionary *row = [[self panelRowForItem:item kind:@"cli"] mutableCopy];
+        row[@"meta"] = item[@"source"] ?: @"";
+        [rows addObject:row];
+    }
+    return rows;
+}
+
+- (void)tickerPanel:(TickerPanelController *)panel activateRow:(NSDictionary *)row {
+    NSString *kind = row[@"kind"];
+    NSDictionary *item = row[@"item"];
+    if ([kind isEqualToString:@"registry"]) return;
+    [panel close];
+    if ([kind isEqualToString:@"updateAll"]) {
+        [NSApp activateIgnoringOtherApps:YES];
+        [self updateAll:nil];
+    } else if ([kind isEqualToString:@"update"] && item) {
+        [NSApp activateIgnoringOtherApps:YES];
+        [self runUpdateForItem:item confirm:YES];
+    } else if ([kind isEqualToString:@"agent"] && item) {
+        [self runInPreferredTerminal:[self launchCommandForAgentItem:item]];
+    } else if (item) {
+        [self runInPreferredTerminal:[self launchCommandForCLIItem:item]];
+    }
+}
+
+- (void)tickerPanel:(TickerPanelController *)panel pressButtonOnRow:(NSDictionary *)row {
+    // The row button is the only path that starts a registry update.
+    if ([row[@"kind"] isEqualToString:@"registry"]) [self.registry runUpdateForStatus:row];
+}
+
+- (void)tickerPanel:(TickerPanelController *)panel copyRow:(NSDictionary *)row {
+    NSString *text = [row[@"kind"] isEqualToString:@"registry"]
+        ? (row[@"updateCommand"] ?: row[@"path"])
+        : (row[@"item"] ? [self invocationForCLIItem:row[@"item"]] : nil);
+    if (text.length == 0) return;
+    [[NSPasteboard generalPasteboard] clearContents];
+    [[NSPasteboard generalPasteboard] setString:text forType:NSPasteboardTypeString];
+}
+
+- (void)tickerPanel:(TickerPanelController *)panel performCommand:(NSString *)command {
+    if ([command isEqualToString:TickerCommandRefresh]) {
+        [self refresh:nil];
+        [self.registry refreshWithInventory:self.items force:YES];
+        return;
+    }
+    [panel close];
+    if ([command isEqualToString:TickerCommandUpdateAll]) {
+        [NSApp activateIgnoringOtherApps:YES];
+        [self updateAll:nil];
+    } else if ([command isEqualToString:TickerCommandJSONReport]) {
+        [self openJSONReport:nil];
+    } else if ([command isEqualToString:TickerCommandMarkdownReport]) {
+        [self openMarkdownReport:nil];
+    } else if ([command isEqualToString:TickerCommandClassicMenu]) {
+        [self showClassicMenu];
+    } else if ([command isEqualToString:TickerCommandQuit]) {
+        [self quit:nil];
+    }
+}
+
+- (void)tickerPanel:(TickerPanelController *)panel selectTerminal:(NSString *)terminal {
+    if (terminal.length == 0) return;
+    self.preferredTerminal = terminal;
+    [[NSUserDefaults standardUserDefaults] setObject:terminal forKey:@"PreferredTerminal"];
+    [self rebuildMenu];
+}
+
 @end
 
 @interface AppDelegate : NSObject <NSApplicationDelegate>
@@ -1758,8 +2021,104 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 
 @implementation AppDelegate
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    if (RenderPanelPreviewsIfRequested()) return;
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     self.menuController = [[MenuController alloc] init];
+    [self startRegistryDumpIfRequested];
+}
+
+// `--dump-registry <dir>` waits for the first real scan and version checks, then writes
+// registry-status.json and a live render of the CLIs view, and exits. With
+// `--exercise-update <id>` it then presses that row's update button, records the streamed
+// progress and result, waits for the re-check, and dumps again. Used by CI.
+- (void)startRegistryDumpIfRequested {
+    NSArray<NSString *> *arguments = [[NSProcessInfo processInfo] arguments];
+    NSUInteger flag = [arguments indexOfObject:@"--dump-registry"];
+    if (flag == NSNotFound || flag + 1 >= arguments.count) return;
+    NSString *directory = arguments[flag + 1];
+    NSUInteger updateFlag = [arguments indexOfObject:@"--exercise-update"];
+    NSString *updateId = updateFlag != NSNotFound && updateFlag + 1 < arguments.count ? arguments[updateFlag + 1] : nil;
+    [[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
+
+    MenuController *controller = self.menuController;
+    NSDate *started = [NSDate date];
+    NSMutableArray<NSString *> *progress = [NSMutableArray array];
+    __block NSInteger phase = 0;
+    __block BOOL sawRefresh = NO;
+    __block NSDictionary *before = nil;
+
+    NSDictionary *(^statusWithId)(NSString *) = ^NSDictionary *(NSString *entryId) {
+        for (NSDictionary *status in controller.registry.statuses) {
+            if ([status[@"id"] isEqualToString:entryId]) return status;
+        }
+        return nil;
+    };
+    void (^dump)(NSString *) = ^(NSString *suffix) {
+        NSMutableArray *rows = [NSMutableArray array];
+        for (NSDictionary *status in controller.registry.statuses) {
+            NSMutableDictionary *row = [NSMutableDictionary dictionary];
+            for (NSString *key in @[@"id", @"title", @"path", @"version", @"latest", @"via", @"state", @"updateCommand", @"updateState"]) {
+                if (status[key]) row[key] = status[key];
+            }
+            [rows addObject:row];
+        }
+        NSData *json = [NSJSONSerialization dataWithJSONObject:rows options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
+        [json writeToFile:[directory stringByAppendingPathComponent:[NSString stringWithFormat:@"registry-status%@.json", suffix]] atomically:YES];
+        controller.panel.selectedViewId = @"clis";
+        WritePanelPreviewPNG([controller.panel renderContentBitmap], [directory stringByAppendingPathComponent:[NSString stringWithFormat:@"cli-list-live%@.png", suffix]], NO);
+        fprintf(stderr, "registry dump%s: %lu CLIs\n", suffix.UTF8String, (unsigned long)rows.count);
+    };
+    void (^finish)(int) = ^(int code) {
+        if (updateId) {
+            NSDictionary *after = statusWithId(updateId);
+            NSDictionary *report = @{@"id": updateId, @"before": before ?: @{}, @"afterVersion": after[@"version"] ?: @"", @"afterState": after[@"state"] ?: @"",
+                                     @"updateState": after[@"updateState"] ?: @"", @"progress": progress};
+            NSData *json = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
+            [json writeToFile:[directory stringByAppendingPathComponent:@"update-exercise.json"] atomically:YES];
+        }
+        exit(code);
+    };
+
+    [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
+        if (-[started timeIntervalSinceNow] > 600) {
+            [timer invalidate];
+            fprintf(stderr, "registry dump timed out in phase %ld\n", (long)phase);
+            finish(1);
+            return;
+        }
+        if (controller.refreshing) sawRefresh = YES;
+        BOOL settled = sawRefresh && !controller.refreshing && !controller.registry.isChecking;
+
+        if (phase == 0) {
+            if (!settled) return;
+            dump(@"");
+            NSDictionary *target = updateId ? statusWithId(updateId) : nil;
+            if (!target || [target[@"updateCommand"] length] == 0) {
+                [timer invalidate];
+                if (updateId) fprintf(stderr, "exercise-update: %s not installed or has no update command\n", updateId.UTF8String);
+                finish(0);
+                return;
+            }
+            before = @{@"version": target[@"version"] ?: @"", @"state": target[@"state"] ?: @"", @"command": target[@"updateCommand"]};
+            [controller tickerPanel:controller.panel pressButtonOnRow:target];
+            phase = 1;
+            return;
+        }
+
+        NSString *line = [controller.registry activeUpdateSummary];
+        if (line.length > 0 && ![progress.lastObject isEqualToString:line]) [progress addObject:line];
+        NSString *updateState = statusWithId(updateId)[@"updateState"];
+        if (phase == 1) {
+            if (![updateState isEqualToString:CLIUpdateStateSucceeded] && ![updateState isEqualToString:CLIUpdateStateFailed]) return;
+            sawRefresh = controller.refreshing;
+            phase = 2;
+            return;
+        }
+        if (!settled && !(controller.registry.isChecking == NO && controller.refreshing == NO)) return;
+        [timer invalidate];
+        dump(@"-after-update");
+        finish([statusWithId(updateId)[@"updateState"] isEqualToString:CLIUpdateStateFailed] ? 1 : 0);
+    }];
 }
 @end
 
