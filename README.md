@@ -23,7 +23,8 @@ open "$HOME/Applications/CLITicker.app"
 
 ## What Users Get
 
-- Icon-only menu bar app.
+- Icon-only menu bar app. Clicking the icon opens a compact, keyboard-friendly panel (dark slate, monospace, Omarchy-style) with `CLIs`, `Agents`, `Updates`, `Recent`, and `All` views, inline search, a preferred-terminal picker, and per-source bar charts. Right-click (or control-click) the icon for the classic menu below.
+- `CLIs` view: well-known CLIs (gh, git, node, npm, brew, docker, kubectl, terraform, aws, gcloud, az, firebase, vercel, stripe, cursor, claude, and more) with a monochrome logo, installed version, how it was installed, and whether it is up to date. When an update is available the row's `↑ update` button runs the matching command in the background (for example `brew upgrade gh`, `npm install -g firebase-tools`, `gcloud components update --quiet`, `gh extension upgrade --all`), shows live progress and the result, then re-checks the version. Updates only ever run from that click.
 - `Agent Tools` submenu for tools like Codex, Notion, Antigravity, Claude, Amp, Cora, Cursor, Goose, OpenCode, CodeRabbit, Kisuke, Droid, and related CLIs.
 - `Search CLIs` opens a native search panel for installed tools.
 - `Updates Available` submenu with readable version changes, clickable update actions, and an `Update All` action that runs every supported update in one terminal session. Updated tools are removed from the list automatically after the rescan that follows.
@@ -31,6 +32,15 @@ open "$HOME/Applications/CLITicker.app"
 - Clickable agent tools that open the selected CLI in the user's preferred terminal.
 - `Open Report` submenu for JSON or Markdown inventory reports.
 - `Preferred Terminal` submenu with Terminal, Ghostty, iTerm, or Warp when installed.
+
+## CLI Update Checks
+
+Checks run in the background and are cached, so opening the panel is instant:
+
+- Installed versions are cached per binary (path + modification time) in `~/Library/Application Support/CLITicker/cli-versions.json`, so a version probe reruns only when a binary changes.
+- Homebrew and npm installs use the inventory scan (`brew outdated`, `npm outdated -g`).
+- Self-updating tools use a registry `check` command (for example `gcloud components list`) or the latest GitHub release, cached for 6 hours in `github-releases.json`.
+- System binaries (such as `/usr/bin/git`) are shown as `system` and are never updated.
 
 ## Local Scanning
 
@@ -109,6 +119,11 @@ The GitHub Actions release workflow builds `CLITicker.app.tar.gz` and attaches i
 The app is intentionally small:
 
 - `Sources/CLITickerObjC/main.m` contains the menu bar app and scanner.
+- `Sources/CLITickerObjC/TickerPanel.m` renders the menu bar panel.
+- `Sources/CLITickerObjC/CLIRegistry.m` detects registry CLIs, checks for updates, and runs updates with streamed progress.
+- `Assets/CLIRegistry/registry.json` is the data-driven list of known CLIs: binaries, version parsing, Homebrew/npm package names, self-update commands, update checks, and GitHub release repos. Add an entry to support a new CLI.
+- `Assets/CLIRegistry/icons` holds monochrome template icons from [Simple Icons](https://simpleicons.org) (CC0; brand marks remain their owners' trademarks). `scripts/fetch_cli_icons.py` regenerates them. Brands that Simple Icons no longer carries use a monogram.
+- `make previews` renders the panel with fixture data to `build/previews/*.png`; CI uploads them as the `panel-previews` artifact.
 - `Assets/Logos` contains bundled agent-tool logos.
 - `scripts/generate_icon_assets.py` regenerates app/menu icons.
 - `Makefile` builds and packages the app.
