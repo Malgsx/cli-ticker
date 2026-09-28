@@ -166,12 +166,24 @@ HOME="$cmd_home" CLI_TICKER_BIN_DIR="$cmd_home/.local/bin" CLI_TICKER_LINK_DIRS=
   CLI_TICKER_COMMAND_ONLY=1 bash "$root/install.sh" >/dev/null
 test -x "$cmd_home/.local/bin/CLI"
 grep -q cli-ticker-command "$cmd_home/.local/bin/CLI"
-test -L "$cmd_home/.local/bin/cli"
-test "$(readlink "$cmd_home/.local/bin/cli")" = "$cmd_home/.local/bin/CLI"
+# macOS runners use a case-insensitive disk, so `cli` and `CLI` are one file.
+probe="$(mktemp -d)"
+printf a > "$probe/CLI"
+printf b > "$probe/cli"
+if [[ "$(cat "$probe/CLI")" == a ]]; then names_differ=1; else names_differ=0; fi
+rm -rf "$probe"
+if [[ "$names_differ" == 1 ]]; then
+  test -L "$cmd_home/.local/bin/cli"
+  test "$(readlink "$cmd_home/.local/bin/cli")" = "$cmd_home/.local/bin/CLI"
+else
+  test "$cmd_home/.local/bin/cli" -ef "$cmd_home/.local/bin/CLI"
+fi
 test -L "$cmd_path/CLI"
-test -L "$cmd_path/cli"
-test "$(readlink "$cmd_path/cli")" = "$cmd_home/.local/bin/CLI"
 test "$(readlink "$cmd_path/CLI")" = "$cmd_home/.local/bin/CLI"
+if [[ "$names_differ" == 1 ]]; then
+  test -L "$cmd_path/cli"
+  test "$(readlink "$cmd_path/cli")" = "$cmd_home/.local/bin/CLI"
+fi
 test ! -e "$cmd_home/.zshrc"
 out="$(cd "$outside" && CLI_TICKER_DRY_RUN=1 CLI_TICKER_INSTALLED_VERSION=0.4.0 CLI_TICKER_LATEST_VERSION=0.4.0 "$cmd_path/cli" version)"
 printf '%s\n' "$out" | grep -qx "CLI 0.4.0"
@@ -193,9 +205,13 @@ printf '%s\n' "$out" | grep -q "dry-run: would install 0.4.0 from other/cli-tick
 rm -rf "$fork_home" "$fork_path"
 
 # Same inode for cli and CLI (case-insensitive APFS). Reinstalling must keep it.
-ln -f "$cmd_home/.local/bin/CLI" "$cmd_home/.local/bin/cli-hard"
-rm -f "$cmd_home/.local/bin/cli"
-ln "$cmd_home/.local/bin/CLI" "$cmd_home/.local/bin/cli"
+# Removing `cli` on that disk deletes `CLI` too, so only simulate the hard link
+# when the two names can exist at once.
+if [[ "$names_differ" == 1 ]]; then
+  ln -f "$cmd_home/.local/bin/CLI" "$cmd_home/.local/bin/cli-hard"
+  rm -f "$cmd_home/.local/bin/cli"
+  ln "$cmd_home/.local/bin/CLI" "$cmd_home/.local/bin/cli"
+fi
 test "$cmd_home/.local/bin/cli" -ef "$cmd_home/.local/bin/CLI"
 HOME="$cmd_home" CLI_TICKER_BIN_DIR="$cmd_home/.local/bin" CLI_TICKER_LINK_DIRS="$cmd_path" \
   CLI_TICKER_COMMAND_ONLY=1 bash "$root/install.sh" >/dev/null
@@ -231,8 +247,10 @@ err="$(HOME="$open_home" CLI_TICKER_BIN_DIR="$open_home/.local/bin" CLI_TICKER_L
   CLI_TICKER_COMMAND_ONLY=1 bash "$root/install.sh" 2>&1)"
 printf '%s\n' "$err" | grep -q "left alone"
 grep -qx 'foreign-CLI' "$open_path/CLI"
-test -L "$open_path/cli"
-test "$(readlink "$open_path/cli")" = "$open_home/.local/bin/CLI"
+if [[ "$names_differ" == 1 ]]; then
+  test -L "$open_path/cli"
+  test "$(readlink "$open_path/cli")" = "$open_home/.local/bin/CLI"
+fi
 grep -q cli-ticker-command "$open_home/.local/bin/CLI"
 
 # Foreign cli on PATH, free CLI name: link CLI, leave cli alone.
@@ -244,10 +262,14 @@ err="$(HOME="$other_home" CLI_TICKER_BIN_DIR="$other_home/.local/bin" CLI_TICKER
   CLI_TICKER_COMMAND_ONLY=1 bash "$root/install.sh" 2>&1)"
 printf '%s\n' "$err" | grep -q "left alone"
 grep -qx 'foreign-cli' "$other_path/cli"
-test -L "$other_path/CLI"
-test "$(readlink "$other_path/CLI")" = "$other_home/.local/bin/CLI"
-test -L "$other_home/.local/bin/cli"
-test "$(readlink "$other_home/.local/bin/cli")" = "$other_home/.local/bin/CLI"
+if [[ "$names_differ" == 1 ]]; then
+  test -L "$other_path/CLI"
+  test "$(readlink "$other_path/CLI")" = "$other_home/.local/bin/CLI"
+  test -L "$other_home/.local/bin/cli"
+  test "$(readlink "$other_home/.local/bin/cli")" = "$other_home/.local/bin/CLI"
+else
+  test "$other_home/.local/bin/cli" -ef "$other_home/.local/bin/CLI"
+fi
 
 # When no PATH directory is writable, ~/.zshrc gains the owned directory.
 zsh_home="$(mktemp -d)"
@@ -259,7 +281,7 @@ grep -q 'export PATH="'"$zsh_home"'/.local/bin:$PATH" # cli-ticker-command' "$zs
 HOME="$zsh_home" CLI_TICKER_BIN_DIR="$zsh_home/.local/bin" CLI_TICKER_LINK_DIRS="$missing" \
   CLI_TICKER_COMMAND_ONLY=1 bash "$root/install.sh" >/dev/null
 test "$(grep -c cli-ticker-command "$zsh_home/.zshrc")" = 1
-test -L "$zsh_home/.local/bin/cli"
+test "$zsh_home/.local/bin/cli" -ef "$zsh_home/.local/bin/CLI"
 test -x "$zsh_home/.local/bin/CLI"
 
 # A directory that exists but is not writable is skipped the same way.
