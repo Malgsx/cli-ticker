@@ -236,7 +236,11 @@ printf '%s\n' "$err" | grep -q "left alone"
 grep -qx 'foreign-cli' "$foreign/cli"
 # Owned name was foreign, so nothing was installed over it and no PATH link was added.
 grep -qx 'foreign-owned' "$foreign_home/.local/bin/CLI"
-test ! -e "$foreign/CLI"
+if [[ "$names_differ" == 1 ]]; then
+  test ! -e "$foreign/CLI"
+else
+  grep -qx 'foreign-cli' "$foreign/CLI"
+fi
 
 # Foreign CLI on PATH, free cli name: link cli, leave CLI alone.
 open_home="$(mktemp -d)"
