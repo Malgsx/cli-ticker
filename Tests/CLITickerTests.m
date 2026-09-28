@@ -615,6 +615,10 @@ static void TestUpdateConfirmationPaginatesTenPerPage(void) {
     Assert(panel.visibleUpdateCommands.count == 10, @"the first page shows 10 commands");
     Assert([panel.visibleUpdateCommands.firstObject isEqualToString:@"brew upgrade pkg-0"], @"page 1 starts at the first command");
     NSView *sheet = [panel valueForKey:@"updateSheet"];
+    NSButton *exitButton = [sheet valueForKey:@"exitButton"];
+    Assert([exitButton.title isEqualToString:@"Exit"], @"the card has an Exit button");
+    Assert(exitButton.action == @selector(cancelUpdatePressed) && exitButton.target == panel, @"Exit closes the card");
+    Assert(NSMaxY(exitButton.frame) < 36 && NSMinX(exitButton.frame) > NSWidth(sheet.frame) * 0.7, @"Exit sits in the top-right of the card");
     Assert(NSWidth(sheet.frame) > NSHeight(sheet.frame), @"the confirmation is a wide box");
     NSRect sheetInPanel = [sheet convertRect:sheet.bounds toView:panel.panel.contentView];
     Assert(NSContainsRect(panel.panel.contentView.bounds, sheetInPanel), @"the box stays inside the panel");
@@ -645,6 +649,11 @@ static void TestUpdateConfirmationPaginatesTenPerPage(void) {
     Assert(panel.updateSheetVisible && source.confirmed == nil, @"return does not run an empty plan");
     [panel cancelUpdatePressed];
     Assert(!panel.updateSheetVisible, @"cancel dismisses the empty plan");
+
+    [panel presentUpdateConfirmationWithTitle:@"Update 25 tools?" detail:@"Opens Ghostty and runs these" commands:commands];
+    exitButton = [[panel valueForKey:@"updateSheet"] valueForKey:@"exitButton"];
+    Assert([exitButton sendAction:exitButton.action to:exitButton.target], @"Exit sends its action");
+    Assert(!panel.updateSheetVisible && source.confirmed == nil, @"Exit closes the sheet without updating");
 }
 
 int main(int argc, const char *argv[]) {
