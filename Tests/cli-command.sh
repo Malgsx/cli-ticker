@@ -99,13 +99,26 @@ printf 'pulled\n' >> "$pull_tmp/seed/README"
 git -C "$pull_tmp/seed" add README
 git -C "$pull_tmp/seed" commit -m pulled >/dev/null
 git -C "$pull_tmp/seed" push origin main >/dev/null
+# macOS temp dirs live under /var, a symlink to /private/var. bash 3.2's pwd
+# returns the physical path, so either spelling is the same directory.
+expect_dir() {
+  local haystack="$1" prefix="$2" path="$3" physical
+  physical="$(cd "$path" && pwd -P)"
+  case "$haystack" in
+    *"$prefix$path"*|*"$prefix$physical"*) return 0 ;;
+  esac
+  echo "expected ${prefix}<${path}> in:" >&2
+  printf '%s\n' "$haystack" >&2
+  return 1
+}
+
 out="$(cd "$pull_tmp/clone" && CLI_TICKER_REINSTALL_CMD=true "$cli" update)"
-printf '%s\n' "$out" | grep -q "Pulling the latest source in $pull_tmp/clone"
-printf '%s\n' "$out" | grep -q "Reinstalling CLI from $pull_tmp/clone"
+expect_dir "$out" "Pulling the latest source in " "$pull_tmp/clone"
+expect_dir "$out" "Reinstalling CLI from " "$pull_tmp/clone"
 grep -q pulled "$pull_tmp/clone/README"
 mkdir -p "$pull_tmp/clone/nested"
 out="$(cd "$pull_tmp/clone/nested" && CLI_TICKER_DRY_RUN=1 "$cli" update)"
-printf '%s\n' "$out" | grep -q "dry-run: would git pull --ff-only in $pull_tmp/clone"
+expect_dir "$out" "dry-run: would git pull --ff-only in " "$pull_tmp/clone"
 rm -rf "$pull_tmp"
 
 # Command names. The owned copy is ~/.local/bin/CLI. On a case-sensitive disk,
