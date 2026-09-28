@@ -623,10 +623,35 @@ static void TestUpdateConfirmationPaginatesTenPerPage(void) {
     NSRect sheetInPanel = [sheet convertRect:sheet.bounds toView:panel.panel.contentView];
     Assert(NSContainsRect(panel.panel.contentView.bounds, sheetInPanel), @"the box stays inside the panel");
 
+    NSArray<NSString *> *pageOne = [panel.visibleUpdateCommands copy];
+    Assert(pageOne.count == 10, @"page 1 is ten commands");
+    for (NSUInteger i = 0; i < 10; i++) {
+        Assert([pageOne[i] isEqualToString:[NSString stringWithFormat:@"brew upgrade pkg-%lu", (unsigned long)i]], @"page 1 keeps command order");
+    }
+    NSView *commandSheet = [panel valueForKey:@"updateSheet"];
+    NSRect box = [panel visibleUpdateCommandBoxFrame];
+    NSRect first = [panel frameForVisibleUpdateCommandAtIndex:0];
+    NSRect second = [panel frameForVisibleUpdateCommandAtIndex:1];
+    NSRect sixth = [panel frameForVisibleUpdateCommandAtIndex:5];
+    Assert(NSWidth(box) > NSHeight(box) * 2, @"the ten commands sit in a horizontal box");
+    Assert(NSContainsRect(box, first) && NSContainsRect(box, sixth), @"every command on the page is inside the box");
+    Assert(NSMinX(second) >= NSMaxX(first) && fabs(NSMinY(first) - NSMinY(second)) < 1, @"the second command is beside the first");
+    Assert(NSMinY(sixth) >= NSMaxY(first) && fabs(NSMinX(first) - NSMinX(sixth)) < 1, @"the sixth command wraps to the next row of the box");
+    Assert(NSWidth(first) < NSWidth(commandSheet.frame) / 3.0, @"a command is a cell, not a full-width line");
+    NSButton *previous = [commandSheet valueForKey:@"previousButton"];
+    NSButton *next = [commandSheet valueForKey:@"nextButton"];
+    Assert(!previous.hidden && !next.hidden, @"more than ten commands show the page controls");
+
     PressKey(panel, @selector(moveRight:));
     Assert(panel.updatePage == 2 && [panel.visibleUpdateCommands.firstObject isEqualToString:@"brew upgrade pkg-10"], @"right arrow shows the next 10");
+    NSArray<NSString *> *pageTwo = [panel.visibleUpdateCommands copy];
+    Assert(pageTwo.count == 10, @"page 2 is ten commands");
+    Assert(![pageTwo containsObject:@"brew upgrade pkg-0"] && ![pageTwo containsObject:@"brew upgrade pkg-9"], @"page 2 hides the first page");
+    Assert([pageTwo.lastObject isEqualToString:@"brew upgrade pkg-19"], @"page 2 ends at command 20");
     PressKey(panel, @selector(moveRight:));
     Assert(panel.updatePage == 3 && panel.visibleUpdateCommands.count == 5, @"the last page holds the remainder");
+    NSArray<NSString *> *pageThree = [panel.visibleUpdateCommands copy];
+    Assert([pageThree.firstObject isEqualToString:@"brew upgrade pkg-20"] && [pageThree.lastObject isEqualToString:@"brew upgrade pkg-24"], @"page 3 is the last five commands");
     PressKey(panel, @selector(moveRight:));
     Assert(panel.updatePage == 3, @"the last page stays put");
     PressKey(panel, @selector(moveLeft:));
@@ -645,6 +670,8 @@ static void TestUpdateConfirmationPaginatesTenPerPage(void) {
     source.confirmed = nil;
     [panel presentUpdateConfirmationWithTitle:@"No supported updates" detail:@"These need a manual update." commands:@[]];
     Assert(panel.visibleUpdateCommands.count == 0 && panel.updatePageCount == 1, @"an empty plan is one blank page");
+    NSButton *confirm = [[panel valueForKey:@"updateSheet"] valueForKey:@"confirmButton"];
+    Assert(confirm.hidden, @"an empty plan has no Update control");
     PressKey(panel, @selector(insertNewline:));
     Assert(panel.updateSheetVisible && source.confirmed == nil, @"return does not run an empty plan");
     [panel cancelUpdatePressed];
@@ -654,6 +681,109 @@ static void TestUpdateConfirmationPaginatesTenPerPage(void) {
     exitButton = [[panel valueForKey:@"updateSheet"] valueForKey:@"exitButton"];
     Assert([exitButton sendAction:exitButton.action to:exitButton.target], @"Exit sends its action");
     Assert(!panel.updateSheetVisible && source.confirmed == nil, @"Exit closes the sheet without updating");
+
+    NSMutableArray<NSString *> *four = [NSMutableArray array];
+    for (NSUInteger i = 0; i < 4; i++) [four addObject:[NSString stringWithFormat:@"brew upgrade few-%lu", (unsigned long)i]];
+    [panel presentUpdateConfirmationWithTitle:@"Update 4 tools?" detail:@"Opens Ghostty" commands:four];
+    Assert(panel.updatePageCount == 1 && panel.visibleUpdateCommands.count == 4, @"one to ten commands stay on a single page");
+    NSButton *singlePagePrevious = [[panel valueForKey:@"updateSheet"] valueForKey:@"previousButton"];
+    Assert(singlePagePrevious.hidden, @"a single page does not show the pager");
+    NSRect only = [panel frameForVisibleUpdateCommandAtIndex:0];
+    NSRect beside = [panel frameForVisibleUpdateCommandAtIndex:1];
+    Assert(NSMinX(beside) >= NSMaxX(only), @"a short page still lays commands across the box");
+    Assert(NSEqualRects([panel frameForVisibleUpdateCommandAtIndex:4], NSZeroRect), @"a short page does not invent empty slots");
+    [panel cancelUpdatePressed];
+
+    NSMutableArray<NSString *> *eightyEight = [NSMutableArray array];
+    for (NSUInteger i = 0; i < 88; i++) [eightyEight addObject:[NSString stringWithFormat:@"brew upgrade many-%lu", (unsigned long)i]];
+    [panel presentUpdateConfirmationWithTitle:@"Update 88 tools?" detail:@"Opens Ghostty" commands:eightyEight];
+    Assert(panel.updatePageCount == 9 && panel.visibleUpdateCommands.count == 10, @"88 commands fill nine pages of ten");
+    for (NSUInteger page = 1; page < 9; page++) PressKey(panel, @selector(moveRight:));
+    Assert(panel.updatePage == 9 && panel.visibleUpdateCommands.count == 8, @"the ninth page holds the last eight");
+    Assert([panel.visibleUpdateCommands.firstObject isEqualToString:@"brew upgrade many-80"], @"the last page starts at command 81");
+    [panel cancelUpdatePressed];
+}
+
+static NSDictionary *UpdatableRow(NSString *key, NSString *command) {
+    NSMutableDictionary *row = [SelectableRow(key, key) mutableCopy];
+    row[@"updateCommand"] = command;
+    return row;
+}
+
+@interface GroupUpdatePanelSource : UpdatePanelSource
+@end
+
+@implementation GroupUpdatePanelSource
+- (void)tickerPanel:(TickerPanelController *)panel confirmUpdateCommands:(NSArray<NSString *> *)commands {
+    self.confirmed = commands;
+    DispatchGroupUpdate(commands, @"echo group", @"Ghostty", nil);
+}
+@end
+
+static void TestGroupUpdateDoesNotBlock(void) {
+    dispatch_semaphore_t started = dispatch_semaphore_create(0);
+    dispatch_semaphore_t hold = dispatch_semaphore_create(0);
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    __block NSArray<NSString *> *seenCommands = nil;
+    __block NSString *seenTerminal = nil;
+    __block BOOL finished = NO;
+    GroupUpdateHook = ^(NSArray<NSString *> *commands, NSString *terminal) {
+        seenCommands = commands;
+        seenTerminal = terminal;
+        dispatch_semaphore_signal(started);
+        dispatch_semaphore_wait(hold, DISPATCH_TIME_FOREVER);
+        finished = YES;
+        dispatch_semaphore_signal(done);
+    };
+
+    [NSApplication sharedApplication];
+    GroupUpdatePanelSource *source = [[GroupUpdatePanelSource alloc] init];
+    source.rows = @[
+        UpdatableRow(@"a", @"brew upgrade a"),
+        UpdatableRow(@"b", @"brew upgrade b"),
+        UpdatableRow(@"c", @"npm install -g c")
+    ];
+    TickerPanelController *panel = [[TickerPanelController alloc] init];
+    panel.delegate = source;
+    [panel renderContentBitmap];
+    [panel setSelectMode:YES];
+    [panel handleRowClickAtIndex:0 shift:NO];
+    [panel handleRowClickAtIndex:2 shift:NO];
+    NSButton *update = [panel valueForKey:@"footerUpdate"];
+    Assert(update != nil && !update.hidden, @"two selected updates show an Update control");
+    Assert([update.title isEqualToString:@"Update 2"], @"the control counts the selected update commands");
+    Assert([update sendAction:update.action to:update.target], @"Update opens the confirmation");
+    Assert(panel.updateSheetVisible && panel.updatePageCount == 1, @"the selection confirms in the in-panel sheet");
+    Assert([panel.visibleUpdateCommands isEqualToArray:@[@"brew upgrade a", @"npm install -g c"]], @"the sheet lists only the selected commands");
+    NSButton *pager = [[panel valueForKey:@"updateSheet"] valueForKey:@"previousButton"];
+    Assert(pager.hidden, @"two commands do not paginate");
+
+    source.confirmed = nil;
+    NSDate *began = [NSDate date];
+    PressKey(panel, @selector(insertNewline:));
+    Assert(-[began timeIntervalSinceNow] < 0.5, @"confirming a multi-select update returns immediately");
+    Assert(!panel.updateSheetVisible, @"confirm closes the sheet");
+    Assert(source.confirmed.count == 2, @"confirm hands back every selected command");
+    Assert(dispatch_semaphore_wait(started, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC))) == 0, @"the group update runs off the caller");
+    Assert(!finished, @"the caller does not wait for the terminal");
+    Assert([seenCommands isEqualToArray:source.confirmed], @"the background update receives the selected commands");
+    Assert([seenTerminal isEqualToString:@"Ghostty"], @"the background update uses the preferred terminal");
+    dispatch_semaphore_signal(hold);
+    Assert(dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC))) == 0, @"the background update finishes once released");
+    GroupUpdateHook = nil;
+
+    [panel noteBackgroundUpdateStatus:@"Updating 2 in Ghostty…"];
+    NSTextField *footer = [panel valueForKey:@"footerRight"];
+    Assert([footer.stringValue isEqualToString:@"Updating 2 in Ghostty…"], @"group update progress shows in the footer");
+    NSMutableDictionary *running = [UpdatableRow(@"a", @"brew upgrade a") mutableCopy];
+    running[@"updateState"] = @"running";
+    source.rows = @[running];
+    [panel setSelectMode:NO];
+    [panel reload];
+    NSTableView *table = [panel valueForKey:@"tableView"];
+    NSView *cell = [table viewAtColumn:0 row:0 makeIfNecessary:YES];
+    NSTextField *meta = [cell valueForKey:@"metaLabel"];
+    Assert([meta.stringValue isEqualToString:@"updating"], @"a running group update marks the row");
 }
 
 int main(int argc, const char *argv[]) {
@@ -685,6 +815,7 @@ int main(int argc, const char *argv[]) {
         TestTerminalLaunchDoesNotBlock();
         TestSelectModeConfirmsBeforeUninstall();
         TestUpdateConfirmationPaginatesTenPerPage();
+        TestGroupUpdateDoesNotBlock();
         NSLog(@"All CLITicker tests passed.");
     }
     return 0;

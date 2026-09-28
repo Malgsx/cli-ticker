@@ -789,8 +789,23 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 }
 @end
 
-// Update-all confirmation: a wide card, ten commands to a page, pager along the bottom.
-static const CGFloat UpdateRowHeight = 20;
+// Update confirmation: a short dark card. Ten commands fill a horizontal box (five across,
+// two rows), then the next page. The pager sits under that box.
+static const NSUInteger UpdatePageColumns = 5;
+static const CGFloat UpdateCellHeight = 20;
+static const CGFloat UpdateCellGap = 6;
+static const CGFloat UpdateBoxPad = 6;
+
+static NSString *TickerTruncatedString(NSString *text, NSDictionary *attributes, CGFloat limit) {
+    if (text.length == 0 || limit <= 8) return @"";
+    if ([text sizeWithAttributes:attributes].width <= limit) return text;
+    NSString *ellipsis = @"…";
+    NSMutableString *trimmed = [text mutableCopy];
+    while (trimmed.length > 1 && [[trimmed stringByAppendingString:ellipsis] sizeWithAttributes:attributes].width > limit) {
+        [trimmed deleteCharactersInRange:NSMakeRange(trimmed.length - 1, 1)];
+    }
+    return [trimmed stringByAppendingString:ellipsis];
+}
 
 @interface TickerUpdateSheet : TickerFlippedView
 @property (copy) NSString *heading;
@@ -804,6 +819,8 @@ static const CGFloat UpdateRowHeight = 20;
 @property TickerChipButton *confirmButton;
 - (NSUInteger)pageCount;
 - (NSArray<NSString *> *)visibleCommands;
+- (NSRect)commandBoxRect;
+- (NSRect)frameForVisibleCommandAtIndex:(NSUInteger)index;
 - (void)stepPage:(NSInteger)delta;
 - (void)relayout;
 @end
@@ -822,8 +839,8 @@ static const CGFloat UpdateRowHeight = 20;
     self.exitButton.bordered = NO;
     self.cancelButton.bordered = NO;
     self.confirmButton.bordered = NO;
-    self.previousButton.title = @"‹";
-    self.nextButton.title = @"›";
+    self.previousButton.title = @"‹ Prev";
+    self.nextButton.title = @"Next ›";
     self.exitButton.title = @"Exit";
     self.cancelButton.title = @"Cancel";
     self.confirmButton.title = @"Update";
@@ -846,6 +863,40 @@ static const CGFloat UpdateRowHeight = 20;
     return [self.commands subarrayWithRange:NSMakeRange(start, length)];
 }
 
+- (NSUInteger)visibleColumnCount {
+    NSUInteger count = self.visibleCommands.count;
+    if (count == 0) return 0;
+    return MIN(UpdatePageColumns, count);
+}
+
+- (NSUInteger)visibleRowCount {
+    NSUInteger count = self.visibleCommands.count;
+    if (count == 0) return 0;
+    return (count + UpdatePageColumns - 1) / UpdatePageColumns;
+}
+
+- (NSRect)commandBoxRect {
+    NSUInteger rows = [self visibleRowCount];
+    if (rows == 0 || NSWidth(self.bounds) <= 24) return NSZeroRect;
+    CGFloat boxHeight = UpdateBoxPad * 2 + rows * UpdateCellHeight + (rows - 1) * UpdateCellGap;
+    return NSMakeRect(12, 46, NSWidth(self.bounds) - 24, boxHeight);
+}
+
+- (NSRect)frameForVisibleCommandAtIndex:(NSUInteger)index {
+    if (index >= self.visibleCommands.count) return NSZeroRect;
+    NSRect box = [self commandBoxRect];
+    NSUInteger columns = [self visibleColumnCount];
+    if (columns == 0 || NSWidth(box) <= UpdateBoxPad * 2) return NSZeroRect;
+    CGFloat innerWidth = NSWidth(box) - UpdateBoxPad * 2;
+    CGFloat cellWidth = (innerWidth - (columns - 1) * UpdateCellGap) / columns;
+    NSUInteger column = index % columns;
+    NSUInteger row = index / columns;
+    return NSMakeRect(NSMinX(box) + UpdateBoxPad + column * (cellWidth + UpdateCellGap),
+                       NSMinY(box) + UpdateBoxPad + row * (UpdateCellHeight + UpdateCellGap),
+                       cellWidth,
+                       UpdateCellHeight);
+}
+
 - (void)stepPage:(NSInteger)delta {
     NSInteger last = (NSInteger)self.pageCount - 1;
     self.page = MAX(0, MIN(last, self.page + delta));
@@ -854,21 +905,25 @@ static const CGFloat UpdateRowHeight = 20;
 }
 
 - (void)relayout {
-    NSUInteger shown = self.commands.count == 0 ? 2 : MIN(TickerUpdatePageSize, MAX(self.visibleCommands.count, 1));
+    NSUInteger rows = self.commands.count == 0 ? 0 : [self visibleRowCount];
+    CGFloat boxHeight = rows == 0 ? 22 : (UpdateBoxPad * 2 + rows * UpdateCellHeight + (rows - 1) * UpdateCellGap);
     CGFloat width = TickerPanelSize.width - 28;
-    CGFloat height = 62 + shown * UpdateRowHeight + 42;
+    CGFloat height = 46 + boxHeight + 36;
     CGFloat available = TickerPanelSize.height - ToolbarHeight - FooterHeight;
     CGFloat y = ToolbarHeight + MAX(8, floor((available - height) / 2.0));
     self.frame = NSMakeRect(14, y, width, height);
 
-    CGFloat buttonY = height - 32;
+    CGFloat pagerY = height - 28;
+    BOOL multiPage = self.pageCount > 1;
     self.exitButton.frame = NSMakeRect(width - 70, 4, 54, 22);
-    self.previousButton.frame = NSMakeRect(16, buttonY, 28, 22);
-    self.nextButton.frame = NSMakeRect(92, buttonY, 28, 22);
-    self.confirmButton.frame = NSMakeRect(width - 96, buttonY, 80, 22);
-    self.cancelButton.frame = NSMakeRect(width - 184, buttonY, 80, 22);
+    self.previousButton.frame = NSMakeRect(16, pagerY, 64, 22);
+    self.nextButton.frame = NSMakeRect(160, pagerY, 72, 22);
+    self.confirmButton.frame = NSMakeRect(width - 96, pagerY, 80, 22);
+    self.cancelButton.frame = NSMakeRect(width - 184, pagerY, 80, 22);
     BOOL hasCommands = self.commands.count > 0;
     self.confirmButton.hidden = !hasCommands;
+    self.previousButton.hidden = !multiPage;
+    self.nextButton.hidden = !multiPage;
     self.previousButton.enabled = self.page > 0;
     self.nextButton.enabled = self.page + 1 < (NSInteger)self.pageCount;
     self.previousButton.alphaValue = self.previousButton.enabled ? 1 : 0.35;
@@ -877,9 +932,10 @@ static const CGFloat UpdateRowHeight = 20;
 
 - (void)drawRect:(NSRect)dirtyRect {
     [super drawRect:dirtyRect];
-    [SectionTitle(@"Update") drawAtPoint:NSMakePoint(18, 12)];
+    [SectionTitle(@"Update") drawAtPoint:NSMakePoint(18, 8)];
     NSDictionary *titleAttributes = @{NSFontAttributeName: TickerFont(13, NSFontWeightSemibold), NSForegroundColorAttributeName: TextBright()};
-    [self.heading ?: @"" drawAtPoint:NSMakePoint(18, 28) withAttributes:titleAttributes];
+    NSString *heading = self.heading ?: @"";
+    [heading drawAtPoint:NSMakePoint(18, 24) withAttributes:titleAttributes];
     NSDictionary *detailAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: TextDim()};
     NSString *detail = self.detailText ?: @"";
     NSMutableParagraphStyle *detailStyle = [[NSMutableParagraphStyle alloc] init];
@@ -887,41 +943,51 @@ static const CGFloat UpdateRowHeight = 20;
     detailStyle.lineBreakMode = NSLineBreakByTruncatingTail;
     NSMutableDictionary *detailDrawAttributes = [detailAttributes mutableCopy];
     detailDrawAttributes[NSParagraphStyleAttributeName] = detailStyle;
+    CGFloat detailLeft = 18 + [heading sizeWithAttributes:titleAttributes].width + 12;
     CGFloat detailRight = NSMinX(self.exitButton.frame) - 8;
-    [detail drawInRect:NSMakeRect(88, 8, MAX(0, detailRight - 88), 14) withAttributes:detailDrawAttributes];
+    if (detailRight > detailLeft) {
+        [detail drawInRect:NSMakeRect(detailLeft, 26, detailRight - detailLeft, 14) withAttributes:detailDrawAttributes];
+    }
 
-    NSDictionary *indexAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: TextDim()};
-    NSDictionary *commandAttributes = @{NSFontAttributeName: TickerFont(11, NSFontWeightRegular), NSForegroundColorAttributeName: TextPrimary()};
     NSArray<NSString *> *visible = [self visibleCommands];
     if (visible.count == 0) {
-        [@"Nothing here can be updated from the panel." drawAtPoint:NSMakePoint(18, 62) withAttributes:detailAttributes];
-    }
-    NSUInteger start = (NSUInteger)self.page * TickerUpdatePageSize;
-    CGFloat commandLimit = NSWidth(self.bounds) - 64;
-    for (NSUInteger i = 0; i < visible.count; i++) {
-        CGFloat y = 58 + i * UpdateRowHeight;
-        if (i % 2 == 0) {
-            [RGBA(1, 1, 1, 0.025) setFill];
-            NSRectFillUsingOperation(NSMakeRect(10, y, NSWidth(self.bounds) - 20, UpdateRowHeight), NSCompositingOperationSourceOver);
+        [@"Nothing here can be updated from the panel." drawAtPoint:NSMakePoint(18, 52) withAttributes:detailAttributes];
+    } else {
+        NSRect box = [self commandBoxRect];
+        [RGBA(0, 0, 0, 0.28) setFill];
+        NSRectFillUsingOperation(box, NSCompositingOperationSourceOver);
+        [BorderColor() setStroke];
+        NSBezierPath *border = [NSBezierPath bezierPathWithRect:NSInsetRect(box, 0.5, 0.5)];
+        border.lineWidth = 1;
+        [border stroke];
+
+        NSDictionary *indexAttributes = @{NSFontAttributeName: TickerFont(9, NSFontWeightRegular), NSForegroundColorAttributeName: TextDim()};
+        NSDictionary *commandAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: TextPrimary()};
+        NSUInteger start = (NSUInteger)self.page * TickerUpdatePageSize;
+        for (NSUInteger i = 0; i < visible.count; i++) {
+            NSRect cell = [self frameForVisibleCommandAtIndex:i];
+            [RGBA(1, 1, 1, 0.06) setFill];
+            NSRectFillUsingOperation(cell, NSCompositingOperationSourceOver);
+            [BorderColor() setStroke];
+            NSBezierPath *cellBorder = [NSBezierPath bezierPathWithRect:NSInsetRect(cell, 0.5, 0.5)];
+            cellBorder.lineWidth = 1;
+            [cellBorder stroke];
+            NSString *index = [NSString stringWithFormat:@"%02lu", (unsigned long)(start + i + 1)];
+            [index drawAtPoint:NSMakePoint(NSMinX(cell) + 4, NSMinY(cell) + 3) withAttributes:indexAttributes];
+            CGFloat textX = NSMinX(cell) + 22;
+            CGFloat limit = NSMaxX(cell) - textX - 4;
+            NSString *command = TickerTruncatedString(visible[i], commandAttributes, limit);
+            [command drawAtPoint:NSMakePoint(textX, NSMinY(cell) + 3) withAttributes:commandAttributes];
         }
-        NSString *index = [NSString stringWithFormat:@"%02lu", (unsigned long)(start + i + 1)];
-        [index drawAtPoint:NSMakePoint(18, y + 3) withAttributes:indexAttributes];
-        NSString *command = visible[i];
-        while (command.length > 4 && [command sizeWithAttributes:commandAttributes].width > commandLimit) {
-            command = [[command substringToIndex:command.length - 1] stringByAppendingString:@"…"];
-            // The appended ellipsis can still be too wide; drop one more source character next loop.
-            if ([command sizeWithAttributes:commandAttributes].width > commandLimit && command.length > 4) {
-                command = [[command substringToIndex:command.length - 2] stringByAppendingString:@"…"];
-            }
-        }
-        [command drawAtPoint:NSMakePoint(52, y + 2) withAttributes:commandAttributes];
     }
 
-    NSString *pageLabel = [NSString stringWithFormat:@"%ld / %lu", (long)(self.page + 1), (unsigned long)self.pageCount];
-    NSDictionary *pageAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: TextSecondary()};
-    NSSize pageSize = [pageLabel sizeWithAttributes:pageAttributes];
-    [pageLabel drawAtPoint:NSMakePoint(48, NSHeight(self.bounds) - 26) withAttributes:pageAttributes];
-    (void)pageSize;
+    if (self.pageCount > 1) {
+        NSString *pageLabel = [NSString stringWithFormat:@"%ld / %lu", (long)(self.page + 1), (unsigned long)self.pageCount];
+        NSDictionary *pageAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightSemibold), NSForegroundColorAttributeName: TextBright()};
+        NSSize pageSize = [pageLabel sizeWithAttributes:pageAttributes];
+        CGFloat labelX = NSMaxX(self.previousButton.frame) + 8;
+        [pageLabel drawAtPoint:NSMakePoint(labelX, NSMinY(self.previousButton.frame) + (NSHeight(self.previousButton.frame) - pageSize.height) / 2.0) withAttributes:pageAttributes];
+    }
 }
 @end
 
@@ -952,6 +1018,7 @@ static const CGFloat UpdateRowHeight = 20;
 @property (readwrite, getter=isSelecting) BOOL selecting;
 @property (readwrite, getter=isUninstallSheetVisible) BOOL uninstallSheetVisible;
 @property (readwrite, getter=isUpdateSheetVisible) BOOL updateSheetVisible;
+@property (copy) NSString *backgroundUpdateStatus;
 @property TickerMenuBackdrop *updateBackdrop;
 @property TickerUpdateSheet *updateSheet;
 @property NSMutableOrderedSet<NSString *> *selectedKeySet;
@@ -960,6 +1027,7 @@ static const CGFloat UpdateRowHeight = 20;
 @property TickerChipButton *selectAllButton;
 @property TickerChipButton *clearButton;
 @property TickerChipButton *footerUninstall;
+@property TickerChipButton *footerUpdate;
 @property TickerUninstallSheet *uninstallSheet;
 @property NSMutableArray<NSMutableDictionary *> *uninstallPlans;
 @property BOOL uninstallRunning;
@@ -1216,6 +1284,14 @@ static const CGFloat UpdateRowHeight = 20;
     self.footerUninstall.hidden = YES;
     [self.root addSubview:self.footerUninstall];
 
+    self.footerUpdate = [[TickerChipButton alloc] initWithFrame:NSZeroRect];
+    self.footerUpdate.bordered = NO;
+    self.footerUpdate.title = @"Update";
+    self.footerUpdate.target = self;
+    self.footerUpdate.action = @selector(updateSelectionPressed);
+    self.footerUpdate.hidden = YES;
+    [self.root addSubview:self.footerUpdate];
+
     self.uninstallSheet = [[TickerUninstallSheet alloc] initWithFrame:NSMakeRect(SidebarWidth + 1, ToolbarHeight, TickerPanelSize.width - SidebarWidth - 2, TickerPanelSize.height - ToolbarHeight - FooterHeight)];
     self.uninstallSheet.fillColor = RGBA(0.125, 0.149, 0.188, 1);
     self.uninstallSheet.strokeColor = BorderColor();
@@ -1296,7 +1372,7 @@ static const CGFloat UpdateRowHeight = 20;
     NSDictionary *stats = self.snapshot[@"stats"];
     self.footerBar.values = @[stats[@"current"] ?: @0, stats[@"outdated"] ?: @0, stats[@"unknown"] ?: @0];
     self.footerBar.needsDisplay = YES;
-    self.footerRight.stringValue = self.snapshot[@"status"] ?: @"";
+    self.footerRight.stringValue = self.backgroundUpdateStatus.length > 0 ? self.backgroundUpdateStatus : (self.snapshot[@"status"] ?: @"");
     [self updateSelectionChrome];
 
     NSDictionary *scanning = self.snapshot[@"scanning"];
@@ -1448,6 +1524,11 @@ static const CGFloat UpdateRowHeight = 20;
     [cell setNeedsLayout:YES];
     cell.needsDisplay = YES;
 
+    if ([row[@"updateState"] isEqualToString:@"running"] && ![row[@"kind"] isEqualToString:@"registry"]) {
+        cell.metaLabel.stringValue = @"updating";
+        cell.metaLabel.textColor = TextBright();
+        cell.metaLabel.hidden = NO;
+    }
     if ([row[@"kind"] isEqualToString:@"registry"]) [self configureRegistryCell:cell withRow:row];
     if (self.selecting && !selectable && hasReason) {
         cell.actionButton.hidden = YES;
@@ -1811,7 +1892,10 @@ static const CGFloat UpdateRowHeight = 20;
     BOOL showUninstall = self.selecting && !self.settingsVisible;
     self.footerUninstall.hidden = !showUninstall;
     self.footerBar.hidden = showUninstall;
-    self.footerRight.hidden = showUninstall;
+    self.footerRight.hidden = showUninstall && self.backgroundUpdateStatus.length == 0;
+    NSArray<NSString *> *updateCommands = showUninstall ? [self selectedUpdateCommands] : @[];
+    BOOL showUpdate = updateCommands.count > 1;
+    self.footerUpdate.hidden = !showUpdate;
     if (showUninstall) {
         NSString *summary = [NSString stringWithFormat:@"%lu selected · Uninstall", (unsigned long)self.selectedKeySet.count];
         self.footerLeft.hidden = YES;
@@ -1820,6 +1904,12 @@ static const CGFloat UpdateRowHeight = 20;
         CGFloat textWidth = MAX(120, ceil([summary sizeWithAttributes:attributes].width) + 16);
         self.footerUninstall.frame = NSMakeRect(8, TickerPanelSize.height - FooterHeight + 2, textWidth, 18);
         self.footerUninstall.enabled = self.selectedKeySet.count > 0;
+        if (showUpdate) {
+            NSString *updateTitle = [NSString stringWithFormat:@"Update %lu", (unsigned long)updateCommands.count];
+            self.footerUpdate.title = updateTitle;
+            CGFloat updateWidth = MAX(72, ceil([updateTitle sizeWithAttributes:attributes].width) + 16);
+            self.footerUpdate.frame = NSMakeRect(NSMaxX(self.footerUninstall.frame) + 8, TickerPanelSize.height - FooterHeight + 2, updateWidth, 18);
+        }
     } else {
         self.footerLeft.hidden = NO;
         if (!self.settingsVisible) {
@@ -1860,6 +1950,39 @@ static const CGFloat UpdateRowHeight = 20;
     self.selectionAnchor = -1;
     [self reloadVisibleRowsKeepingHighlight:self.tableView.selectedRow];
     [self updateSelectionChrome];
+}
+
+- (NSArray<NSString *> *)selectedUpdateCommands {
+    NSMutableArray<NSString *> *commands = [NSMutableArray array];
+    NSMutableSet<NSString *> *seenCommands = [NSMutableSet set];
+    NSMutableSet<NSString *> *seenKeys = [NSMutableSet set];
+    NSMutableArray<NSDictionary *> *candidates = [NSMutableArray array];
+    for (NSDictionary *view in [self views]) {
+        NSArray *rows = view[@"rows"];
+        if ([rows isKindOfClass:[NSArray class]]) [candidates addObjectsFromArray:rows];
+    }
+    [candidates addObjectsFromArray:self.rows];
+    for (NSDictionary *row in candidates) {
+        NSString *key = TickerSelectionKey(row);
+        if (!key || ![self.selectedKeySet containsObject:key] || [seenKeys containsObject:key] || !TickerRowIsSelectable(row)) continue;
+        [seenKeys addObject:key];
+        NSString *command = [row[@"updateCommand"] isKindOfClass:[NSString class]] ? row[@"updateCommand"] : nil;
+        if (command.length == 0 || [seenCommands containsObject:command]) continue;
+        [seenCommands addObject:command];
+        [commands addObject:command];
+    }
+    return commands;
+}
+
+- (void)updateSelectionPressed {
+    if (!self.selecting || self.updateSheetVisible) return;
+    NSArray<NSString *> *commands = [self selectedUpdateCommands];
+    if (commands.count < 2) return;
+    NSString *terminal = [self.snapshot[@"preferredTerminal"] isKindOfClass:[NSString class]] ? self.snapshot[@"preferredTerminal"] : @"";
+    if (terminal.length == 0) terminal = @"Terminal";
+    NSString *title = [NSString stringWithFormat:@"Update %lu tools?", (unsigned long)commands.count];
+    NSString *detail = [NSString stringWithFormat:@"Opens %@", terminal];
+    [self presentUpdateConfirmationWithTitle:title detail:detail commands:commands];
 }
 
 - (NSArray<NSMutableDictionary *> *)plansForSelectedRows {
@@ -1934,6 +2057,19 @@ static const CGFloat UpdateRowHeight = 20;
 
 - (NSArray<NSString *> *)visibleUpdateCommands {
     return [self.updateSheet visibleCommands];
+}
+
+- (NSRect)visibleUpdateCommandBoxFrame {
+    return [self.updateSheet commandBoxRect];
+}
+
+- (NSRect)frameForVisibleUpdateCommandAtIndex:(NSUInteger)index {
+    return [self.updateSheet frameForVisibleCommandAtIndex:index];
+}
+
+- (void)noteBackgroundUpdateStatus:(NSString *)status {
+    self.backgroundUpdateStatus = status ?: @"";
+    [self reload];
 }
 
 - (void)presentUpdateConfirmationWithTitle:(NSString *)title detail:(NSString *)detail commands:(NSArray<NSString *> *)commands {

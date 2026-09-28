@@ -781,6 +781,12 @@ static NSDictionary *AnnotatedCLIRow(NSDictionary *row, NSDictionary *entry) {
     }
     NSString *key = SelectionKeyForAnnotatedRow(copy, item);
     if (key && (copy[@"uninstallAction"] || copy[@"uninstallReason"])) copy[@"selectionKey"] = key;
+    if (![copy[@"updateCommand"] isKindOfClass:[NSString class]] || [copy[@"updateCommand"] length] == 0) {
+        NSString *name = [item[@"name"] isKindOfClass:[NSString class]] ? item[@"name"] : @"";
+        NSString *display = PackageAliases()[name] ?: name;
+        NSString *updateCommand = ShellCommandForUpdateAction(UpdateActionForItem(item, display));
+        if (updateCommand.length > 0) copy[@"updateCommand"] = updateCommand;
+    }
     return copy;
 }
 
@@ -1140,6 +1146,8 @@ static NSArray<NSMutableDictionary *> *WithoutPathDuplicates(NSArray<NSMutableDi
 @property BOOL firstRunScanning;
 @property BOOL completedFirstScan;
 @property NSMutableDictionary<NSString *, NSNumber *> *scanProgress;
+@property (copy) NSString *backgroundUpdateStatus;
+@property NSMutableOrderedSet<NSString *> *backgroundUpdateKeys;
 - (NSArray<NSDictionary *> *)panelAgentRows;
 - (NSArray<NSDictionary *> *)panelOtherCLIRows;
 - (NSArray<NSDictionary *> *)panelSourceCounts;
@@ -1222,6 +1230,25 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         if (TerminalLaunchHook) TerminalLaunchHook(commandCopy, terminalCopy);
         else PerformTerminalLaunch(commandCopy, terminalCopy);
+    });
+}
+
+// Tests replace this to observe a multi-select or Update all run without opening a terminal.
+static void (^GroupUpdateHook)(NSArray<NSString *> *commands, NSString *terminal);
+
+// One preferred-terminal session for a group of commands. Returns immediately; the
+// terminal launch happens off the caller's queue. finished runs on the main queue
+// after the terminal has accepted the script.
+static void DispatchGroupUpdate(NSArray<NSString *> *commands, NSString *script, NSString *terminal, void (^finished)(void)) {
+    NSArray<NSString *> *commandsCopy = [commands copy] ?: @[];
+    NSString *scriptCopy = [script copy] ?: @"";
+    NSString *terminalCopy = [terminal copy] ?: @"";
+    void (^finishedCopy)(void) = [finished copy];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        if (GroupUpdateHook) GroupUpdateHook(commandsCopy, terminalCopy);
+        else if (TerminalLaunchHook) TerminalLaunchHook(scriptCopy, terminalCopy);
+        else PerformTerminalLaunch(scriptCopy, terminalCopy);
+        if (finishedCopy) dispatch_async(dispatch_get_main_queue(), finishedCopy);
     });
 }
 
@@ -1900,7 +1927,7 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
     }
     NSUInteger supportedUpdates = [self supportedUpdateItemCount];
     NSString *title = [NSString stringWithFormat:@"Update %lu %@?", supportedUpdates, supportedUpdates == 1 ? @"tool" : @"tools"];
-    NSString *detail = [NSString stringWithFormat:@"Opens %@ and runs these", self.preferredTerminal ?: @"Terminal"];
+    NSString *detail = [NSString stringWithFormat:@"Opens %@", self.preferredTerminal ?: @"Terminal"];
     [self.panel presentUpdateConfirmationWithTitle:title detail:detail commands:commands];
 }
 
@@ -2054,6 +2081,9 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
 
 - (void)refresh:(id)sender {
     if (self.refreshing) return;
+    self.backgroundUpdateStatus = nil;
+    self.backgroundUpdateKeys = nil;
+    [self.panel noteBackgroundUpdateStatus:@""];
     self.refreshing = YES;
     [self.scanProgress removeAllObjects];
     [self reloadPanel];
@@ -2310,6 +2340,7 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
 }
 
 - (NSString *)panelStatusLine {
+    if (self.backgroundUpdateStatus.length > 0) return self.backgroundUpdateStatus;
     NSString *active = [self.registry activeUpdateSummary];
     if (active.length > 0) return active;
     if (self.firstRunScanning) return @"first launch · scanning your machine…";
@@ -2373,7 +2404,13 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
                 if ([candidate[@"id"] isEqualToString:row[@"id"]]) { entry = candidate; break; }
             }
         }
-        [annotated addObject:AnnotatedCLIRow(row, entry ?: @{})];
+        NSMutableDictionary *annotatedRow = [AnnotatedCLIRow(row, entry ?: @{}) mutableCopy];
+        NSString *key = TickerSelectionKey(annotatedRow);
+        if (key && [self.backgroundUpdateKeys containsObject:key]) {
+            annotatedRow[@"updateState"] = @"running";
+            annotatedRow[@"meta"] = @"updating";
+        }
+        [annotated addObject:annotatedRow];
     }
     return annotated;
 }
@@ -2435,9 +2472,41 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
     }];
 }
 
+- (void)beginBackgroundGroupUpdateWithCommands:(NSArray<NSString *> *)commands {
+    if (commands.count == 0) return;
+    NSMutableOrderedSet<NSString *> *keys = [NSMutableOrderedSet orderedSet];
+    NSDictionary *snapshot = [self tickerPanelSnapshot:self.panel];
+    NSArray *views = [snapshot[@"views"] isKindOfClass:[NSArray class]] ? snapshot[@"views"] : @[];
+    for (NSDictionary *view in views) {
+        if (![view isKindOfClass:[NSDictionary class]]) continue;
+        NSArray *rows = [view[@"rows"] isKindOfClass:[NSArray class]] ? view[@"rows"] : @[];
+        for (NSDictionary *row in rows) {
+            if (![row isKindOfClass:[NSDictionary class]]) continue;
+            NSString *command = [row[@"updateCommand"] isKindOfClass:[NSString class]] ? row[@"updateCommand"] : nil;
+            if (command.length == 0 || ![commands containsObject:command]) continue;
+            NSString *key = TickerSelectionKey(row);
+            if (key) [keys addObject:key];
+        }
+    }
+    self.backgroundUpdateKeys = keys;
+    NSString *terminal = self.preferredTerminal.length > 0 ? self.preferredTerminal : @"Terminal";
+    NSUInteger count = commands.count;
+    self.backgroundUpdateStatus = [NSString stringWithFormat:@"Updating %lu in %@…", (unsigned long)count, terminal];
+    if (self.panel.isSelecting) [self.panel setSelectMode:NO];
+    [self.panel noteBackgroundUpdateStatus:self.backgroundUpdateStatus];
+    NSString *script = [self updateAllTerminalCommandWithCommands:commands];
+    __weak typeof(self) weakSelf = self;
+    DispatchGroupUpdate(commands, script, terminal, ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.backgroundUpdateStatus.length == 0) return;
+        strongSelf.backgroundUpdateStatus = [NSString stringWithFormat:@"%lu running in %@", (unsigned long)count, terminal];
+        [strongSelf.panel noteBackgroundUpdateStatus:strongSelf.backgroundUpdateStatus];
+    });
+}
+
 - (void)tickerPanel:(TickerPanelController *)panel confirmUpdateCommands:(NSArray<NSString *> *)commands {
     if (commands.count == 0) return;
-    [self runInPreferredTerminal:[self updateAllTerminalCommandWithCommands:commands]];
+    [self beginBackgroundGroupUpdateWithCommands:commands];
 }
 
 - (void)tickerPanel:(TickerPanelController *)panel pressButtonOnRow:(NSDictionary *)row {
