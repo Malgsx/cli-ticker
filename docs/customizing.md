@@ -29,7 +29,9 @@ All paths are relative to the repository root, so the clone can live anywhere.
 
 ## Agent tools list
 
-Every CLI on `PATH` or in a supported package manager appears automatically. The `Agents` view is a curated list defined near the top of `main.m`:
+Every CLI on `PATH` or in a supported install source appears automatically. `InventoryService` in `main.m` scans `PATH`, Homebrew formulae and casks, npm and Bun globals, `uv tool`, `pipx`, `cargo install --list`, Go's `bin` directories, `~/.local/bin`, and `Contents/Resources/{app/,}bin` / `Contents/SharedSupport/bin` inside apps in `/Applications` and `~/Applications`. On first launch (no `inventory.json` yet) the panel shows the scan's progress. The CLIs view lists registry entries first, then detected CLIs the registry does not know, with a generic icon. Registry results are cached in `registry-status.json` so later launches open instantly.
+
+Executables whose name contains a token such as `agent`, `ai`, `llm`, or `gpt` (see `LooksLikeAgentName()`) are added to the end of the `Agents` view with a generic icon. The curated part of the `Agents` view is defined near the top of `main.m`:
 
 1. `PreferredAgentOrder()`: canonical names (usually the executable) and their order.
 2. `PackageAliases()`: package names mapped to canonical names, for example `@anthropic-ai/claude-code` → `claude`.

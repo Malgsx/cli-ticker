@@ -4,6 +4,7 @@
 
 @interface PanelPreviewSource : NSObject <TickerPanelDelegate>
 @property CLIRegistryService *registry;
+@property BOOL scanning;
 @end
 
 @implementation PanelPreviewSource
@@ -71,7 +72,37 @@
     ];
 }
 
+// First launch, part-way through: a few sources have reported, the rest are still running.
+- (NSDictionary *)scanningSnapshot {
+    NSDictionary *found = @{@"PATH": @412, @"npm -g": @24, @"uv": @4, @"pipx": @3, @"~/.local/bin": @7, @"/Applications": @5};
+    NSMutableArray *steps = [NSMutableArray array];
+    for (NSString *label in @[@"PATH", @"Homebrew", @"casks", @"npm -g", @"bun", @"uv", @"pipx", @"cargo", @"go", @"~/.local/bin", @"/Applications", @"versions"]) {
+        [steps addObject:found[label] ? @{@"label": label, @"done": @YES, @"count": found[label]} : @{@"label": label, @"done": @NO}];
+    }
+    NSArray *empty = @[];
+    return @{
+        @"views": @[
+            @{@"id": @"clis", @"label": @"CLIs", @"symbol": @"square.stack.3d.up", @"rows": empty, @"columns": @[@"Name ·", @"Version", @"Via", @"Status"]},
+            @{@"id": @"agents", @"label": @"Agents", @"symbol": @"sparkles", @"rows": empty, @"columns": @[@"Name ·", @"Version", @"Via", @"Action"]},
+            @{@"id": @"updates", @"label": @"Updates", @"symbol": @"arrow.down.circle", @"rows": empty, @"columns": @[@"Name ·", @"Version", @"Via", @"Action"]},
+            @{@"id": @"recent", @"label": @"Recent", @"symbol": @"clock", @"rows": empty, @"columns": @[@"Name ·", @"Change", @"Via", @"When"]},
+            @{@"id": @"all", @"label": @"All", @"symbol": @"list.bullet", @"rows": empty, @"columns": @[@"Name ·", @"Version", @"Via", @"Status"]}
+        ],
+        @"terminals": @[@"Terminal", @"Ghostty"],
+        @"preferredTerminal": @"Ghostty",
+        @"sources": @[@{@"label": @"path", @"count": @412}, @{@"label": @"npm", @"count": @24}, @{@"label": @"local", @"count": @7}, @{@"label": @"app", @"count": @5}, @{@"label": @"uv", @"count": @4}, @{@"label": @"pipx", @"count": @3}],
+        @"stats": @{@"current": @0, @"outdated": @0, @"unknown": @0},
+        @"status": @"first launch · scanning your machine…",
+        @"scanning": @{
+            @"title": @"Scanning your machine…",
+            @"detail": @"Looking for installed CLIs and AI agents. Only what you have will be listed. Nothing leaves this Mac.",
+            @"steps": steps
+        }
+    };
+}
+
 - (NSDictionary *)tickerPanelSnapshot:(TickerPanelController *)panel {
+    if (self.scanning) return [self scanningSnapshot];
     NSArray *registryRows = [self registryRows];
     return @{
         @"views": @[
@@ -188,8 +219,10 @@ BOOL RenderPanelPreviewsIfRequested(void) {
     BOOL menuBarOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"menubar-preview.png"], YES);
     panel.selectedViewId = @"clis";
     BOOL listOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"cli-list-preview.png"], NO);
+    source.scanning = YES;
+    BOOL scanOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"first-run-scan.png"], YES);
 
-    fprintf(stderr, "menubar-preview: %s, cli-list-preview: %s\n", menuBarOK ? "ok" : "failed", listOK ? "ok" : "failed");
-    exit(menuBarOK && listOK ? 0 : 1);
+    fprintf(stderr, "menubar-preview: %s, cli-list-preview: %s, first-run-scan: %s\n", menuBarOK ? "ok" : "failed", listOK ? "ok" : "failed", scanOK ? "ok" : "failed");
+    exit(menuBarOK && listOK && scanOK ? 0 : 1);
     return YES;
 }
