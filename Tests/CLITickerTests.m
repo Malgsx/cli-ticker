@@ -169,8 +169,238 @@ static void TestRowButtonResolvesRowFromItsView(void) {
     Assert([source.pressedRow[@"id"] isEqualToString:@"second"], @"update button should act on the row that holds it");
 }
 
+static NSString *TemporaryDirectory(void) {
+    NSString *directory = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
+    [[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
+    return directory;
+}
+
+static void WriteExecutable(NSString *path) {
+    [[NSFileManager defaultManager] createDirectoryAtPath:path.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+    [@"#!/bin/sh\necho 1.0.0\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:path error:nil];
+}
+
+static void TestAgentNameHeuristic(void) {
+    for (NSString *name in @[@"acme-agent", @"llm", @"gpt-cli", @"my_ai_tool", @"@corp/claude-helper", @"codex-mini"]) {
+        Assert(LooksLikeAgentName(name), [NSString stringWithFormat:@"%@ should look like an agent", name]);
+    }
+    for (NSString *name in @[@"git", @"tree", @"agentic", @"mail", @"brain", @"jq", @"gpg-agent", @"gpg-connect-agent", @"ssh-agent"]) {
+        Assert(!LooksLikeAgentName(name), [NSString stringWithFormat:@"%@ should not look like an agent", name]);
+    }
+}
+
+static void TestDirectoryScansFindExecutablesOnly(void) {
+    NSString *root = TemporaryDirectory();
+    WriteExecutable([root stringByAppendingPathComponent:@"bin/tool"]);
+    [@"data" writeToFile:[root stringByAppendingPathComponent:@"bin/readme.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    WriteExecutable([root stringByAppendingPathComponent:@"bin/.hidden"]);
+    NSArray *found = ExecutablesInDirectory([root stringByAppendingPathComponent:@"bin"]);
+    Assert(found.count == 1 && [[found.firstObject lastPathComponent] isEqualToString:@"tool"], @"directory scan should return only visible executables");
+
+    NSString *apps = [root stringByAppendingPathComponent:@"Applications"];
+    WriteExecutable([apps stringByAppendingPathComponent:@"Editor.app/Contents/Resources/app/bin/editor"]);
+    WriteExecutable([apps stringByAppendingPathComponent:@"Box.app/Contents/Resources/bin/box"]);
+    WriteExecutable([apps stringByAppendingPathComponent:@"Plain.app/Contents/MacOS/Plain"]);
+    NSArray *directories = AppBundleBinDirectories(@[apps]);
+    Assert(directories.count == 2, @"app bundle scan should find bundled bin directories and skip the app executable");
+    Assert([[directories.firstObject stringByAppendingPathComponent:@"box"] hasSuffix:@"Box.app/Contents/Resources/bin/box"], @"app bundle directories should be sorted by app name");
+}
+
+static void TestCargoAndPipxParsing(void) {
+    NSArray *cargo = ParseCargoInstallList(@"ripgrep v14.1.0:\n    rg\nfd-find v10.2.0:\n    fd\n", @"/Users/x/.cargo/bin");
+    Assert(cargo.count == 2, @"cargo list should yield one item per crate");
+    Assert([cargo[0][@"name"] isEqualToString:@"ripgrep"] && [cargo[0][@"currentVersion"] isEqualToString:@"14.1.0"], @"cargo crate name and version should parse");
+    Assert([cargo[0][@"path"] isEqualToString:@"/Users/x/.cargo/bin/rg"], @"cargo item path should point at its first binary");
+
+    NSString *pipx = @"{\"venvs\": {\"pycowsay\": {\"metadata\": {\"main_package\": {\"package_version\": \"0.0.0.2\", \"apps\": [\"pycowsay\"]}}}}}";
+    NSArray *items = ParsePipxListJSON(pipx, @"/Users/x/.local/bin");
+    Assert(items.count == 1 && [items[0][@"source"] isEqualToString:@"pipx"], @"pipx json should yield pipx items");
+    Assert([items[0][@"currentVersion"] isEqualToString:@"0.0.0.2"] && [items[0][@"path"] isEqualToString:@"/Users/x/.local/bin/pycowsay"], @"pipx version and app path should parse");
+    Assert(ParsePipxListJSON(@"not json", @"/tmp").count == 0, @"malformed pipx output should be ignored");
+}
+
+static void TestDirectoryItemsOnPathAreNotDuplicated(void) {
+    NSString *root = TemporaryDirectory();
+    NSString *tool = [root stringByAppendingPathComponent:@"tool"];
+    WriteExecutable(tool);
+    NSString *link = [root stringByAppendingPathComponent:@"link"];
+    [[NSFileManager defaultManager] createSymbolicLinkAtPath:link withDestinationPath:tool error:nil];
+    NSArray *items = @[Item(@"link", nil, nil, @"PATH", link, StatusUnknown), Item(@"tool", nil, nil, SourceLocalBin, tool, StatusUnknown),
+                       Item(@"other", nil, nil, SourceLocalBin, [root stringByAppendingPathComponent:@"other"], StatusUnknown)];
+    NSArray *kept = WithoutPathDuplicates(items);
+    Assert(kept.count == 2, @"a ~/.local/bin file already on PATH should be listed once");
+}
+
+static void TestRegistryResolvesOffPathBinariesFromInventory(void) {
+    NSString *root = TemporaryDirectory();
+    NSString *codex = [root stringByAppendingPathComponent:@"codex"];
+    WriteExecutable(codex);
+    NSDictionary *paths = [CLIRegistryService binaryPathsFromInventory:@[@{@"name": @"@openai/codex", @"source": @"npm global"}, @{@"name": @"codex", @"source": SourceLocalBin, @"path": codex},
+                                                                          @{@"name": @"gone", @"source": SourceLocalBin, @"path": [root stringByAppendingPathComponent:@"gone"]}]];
+    Assert([paths[@"codex"] isEqualToString:codex], @"inventory paths should resolve registry binaries outside PATH");
+    Assert(paths[@"gone"] == nil, @"missing files should not resolve");
+}
+
+static void TestRegistryRestoresCachedStatuses(void) {
+    NSString *cache = TemporaryDirectory();
+    NSArray *rows = @[@{@"kind": @"registry", @"id": @"codex", @"title": @"Codex", @"path": @"/usr/local/bin/codex", @"state": @"current", @"detail": @"0.47.2"},
+                      @{@"kind": @"registry", @"id": @"no-such-entry", @"title": @"Gone"}];
+    [[NSJSONSerialization dataWithJSONObject:rows options:0 error:nil] writeToFile:[cache stringByAppendingPathComponent:@"registry-status.json"] atomically:YES];
+    CLIRegistryService *registry = [[CLIRegistryService alloc] initWithRegistryURL:[NSURL fileURLWithPath:@"Assets/CLIRegistry/registry.json"]
+                                                                     iconDirectory:@"Assets/CLIRegistry/icons"
+                                                                    cacheDirectory:[NSURL fileURLWithPath:cache]];
+    Assert(registry.hasCachedStatuses, @"saved statuses should be detected");
+    Assert(registry.statuses.count == 1 && [registry.statuses[0][@"id"] isEqualToString:@"codex"], @"cached rows should load, minus entries no longer in the registry");
+    Assert(registry.statuses[0][@"icon"] != nil, @"restored rows should get their icon");
+
+    CLIRegistryService *fresh = [[CLIRegistryService alloc] initWithRegistryURL:[NSURL fileURLWithPath:@"Assets/CLIRegistry/registry.json"]
+                                                                  iconDirectory:@"Assets/CLIRegistry/icons"
+                                                                 cacheDirectory:[NSURL fileURLWithPath:TemporaryDirectory()]];
+    Assert(!fresh.hasCachedStatuses && fresh.statuses.count == 0, @"a first launch has no cached rows");
+}
+
+static void TestRegistryListsAgentCLIs(void) {
+    CLIRegistryService *registry = [[CLIRegistryService alloc] initWithRegistryURL:[NSURL fileURLWithPath:@"Assets/CLIRegistry/registry.json"]
+                                                                     iconDirectory:@"Assets/CLIRegistry/icons"
+                                                                    cacheDirectory:[NSURL fileURLWithPath:TemporaryDirectory()]];
+    NSMutableSet *ids = [NSMutableSet set];
+    for (NSDictionary *entry in registry.entries) [ids addObject:entry[@"id"]];
+    for (NSString *agent in @[@"claude", @"codex", @"cursor-agent", @"gemini", @"aider", @"opencode", @"qwen", @"copilot"]) {
+        Assert([ids containsObject:agent], [NSString stringWithFormat:@"registry should list %@", agent]);
+    }
+}
+
+@interface ScanPanelSource : RowButtonPanelSource
+@property NSDictionary *scanning;
+@end
+
+@implementation ScanPanelSource
+- (NSDictionary *)tickerPanelSnapshot:(TickerPanelController *)panel {
+    NSMutableDictionary *snapshot = [[super tickerPanelSnapshot:panel] mutableCopy];
+    if (self.scanning) snapshot[@"scanning"] = self.scanning;
+    return snapshot;
+}
+@end
+
+static void TestPanelShowsScanningStateOnlyWhileScanning(void) {
+    [NSApplication sharedApplication];
+    ScanPanelSource *source = [[ScanPanelSource alloc] init];
+    source.rows = @[];
+    source.scanning = @{@"title": @"Scanning your machine…", @"detail": @"", @"steps": @[@{@"label": @"PATH", @"done": @YES, @"count": @3}, @{@"label": @"npm -g", @"done": @NO}]};
+    TickerPanelController *panel = [[TickerPanelController alloc] init];
+    panel.delegate = source;
+    [panel renderContentBitmap];
+    NSView *scanView = [panel valueForKey:@"scanView"];
+    Assert(scanView != nil && !scanView.hidden, @"first launch should show the scanning view");
+    source.scanning = nil;
+    source.rows = @[OutdatedRegistryRow(@"codex")];
+    [panel reload];
+    Assert(scanView.hidden, @"the scanning view should go away once results are in");
+}
+
+@interface MenuPanelSource : RowButtonPanelSource
+@property NSMutableArray<NSString *> *commands;
+@property NSMutableArray<NSString *> *settingChanges;
+@end
+
+@implementation MenuPanelSource
+- (NSDictionary *)tickerPanelSnapshot:(TickerPanelController *)panel {
+    NSMutableDictionary *snapshot = [[super tickerPanelSnapshot:panel] mutableCopy];
+    snapshot[@"menu"] = @[
+        @{@"command": TickerCommandUpdateAll, @"title": @"Update all", @"shortcut": @"⌘U"},
+        @{@"command": TickerCommandRefresh, @"title": @"Check for updates / rescan", @"shortcut": @"⌘R"},
+        @{@"command": TickerCommandSettings, @"title": @"Settings", @"separator": @YES},
+        @{@"command": TickerCommandQuit, @"title": @"Quit", @"separator": @YES}
+    ];
+    snapshot[@"settings"] = @[
+        @{@"id": @"terminal", @"label": @"Preferred terminal", @"options": @[@"Terminal", @"Ghostty"], @"index": @0},
+        @{@"id": @"refreshInterval", @"label": @"Rescan every", @"options": @[@"5 min", @"15 min", @"off"], @"index": @1}
+    ];
+    return snapshot;
+}
+- (void)tickerPanel:(TickerPanelController *)panel performCommand:(NSString *)command { [self.commands addObject:command]; }
+- (void)tickerPanel:(TickerPanelController *)panel changeSetting:(NSString *)settingId toOption:(NSString *)option {
+    [self.settingChanges addObject:[NSString stringWithFormat:@"%@=%@", settingId, option]];
+}
+@end
+
+@interface TickerPanelController (MenuTesting) <NSTextFieldDelegate>
+- (void)menuPressed:(id)sender;
+- (void)cancel;
+@end
+
+static void PressKey(TickerPanelController *panel, SEL command) {
+    NSTextField *field = [panel valueForKey:@"searchField"];
+    [panel control:field textView:[[NSTextView alloc] init] doCommandBySelector:command];
+}
+
+static void TestHamburgerMenuIsInPanelAndKeyboardDriven(void) {
+    [NSApplication sharedApplication];
+    MenuPanelSource *source = [[MenuPanelSource alloc] init];
+    source.rows = @[OutdatedRegistryRow(@"codex")];
+    source.commands = [NSMutableArray array];
+    source.settingChanges = [NSMutableArray array];
+    TickerPanelController *panel = [[TickerPanelController alloc] init];
+    panel.delegate = source;
+    [panel renderContentBitmap];
+
+    [panel menuPressed:nil];
+    NSView *menuView = [panel valueForKey:@"menuView"];
+    Assert(panel.menuVisible && !menuView.hidden, @"the hamburger should open the in-panel menu");
+    Assert(NSHeight(menuView.frame) > 4 * 22, @"the menu should size to its items");
+    Assert(NSContainsRect(panel.panel.contentView.bounds, menuView.frame), @"the menu should sit inside the panel");
+
+    PressKey(panel, @selector(moveDown:));
+    PressKey(panel, @selector(insertNewline:));
+    Assert([source.commands isEqualToArray:@[TickerCommandRefresh]], @"down + return should run the second item");
+    Assert(!panel.menuVisible && menuView.hidden, @"activating an item should close the menu");
+
+    [panel menuPressed:nil];
+    PressKey(panel, @selector(moveUp:));
+    PressKey(panel, @selector(insertNewline:));
+    Assert([source.commands.lastObject isEqualToString:TickerCommandQuit], @"up from the first item should wrap to the last");
+
+    [panel menuPressed:nil];
+    PressKey(panel, @selector(cancelOperation:));
+    Assert(!panel.menuVisible, @"esc should close the menu");
+    Assert(source.commands.count == 2, @"esc should not run anything");
+
+    [panel menuPressed:nil];
+    PressKey(panel, @selector(moveDown:));
+    PressKey(panel, @selector(moveDown:));
+    PressKey(panel, @selector(insertNewline:));
+    NSView *settingsView = [panel valueForKey:@"settingsView"];
+    Assert(panel.settingsVisible && !settingsView.hidden, @"Settings should open the inline settings view");
+    Assert(source.commands.count == 2, @"Settings is handled by the panel, not sent as a command");
+
+    PressKey(panel, @selector(moveDown:));
+    PressKey(panel, @selector(moveRight:));
+    PressKey(panel, @selector(moveUp:));
+    PressKey(panel, @selector(moveLeft:));
+    Assert([source.settingChanges isEqualToArray:@[@"refreshInterval=off", @"terminal=Ghostty"]], [NSString stringWithFormat:@"arrow keys should change settings: %@", source.settingChanges]);
+
+    [panel cancel];
+    Assert(!panel.settingsVisible && settingsView.hidden, @"esc should leave settings before closing the panel");
+}
+
+static void TestNoNativeMenuRemains(void) {
+    Assert(![MenuController instancesRespondToSelector:NSSelectorFromString(@"showClassicMenu")], @"the classic NSMenu should be gone");
+    Assert(![MenuController instancesRespondToSelector:NSSelectorFromString(@"rebuildMenu")], @"the classic NSMenu builder should be gone");
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        TestHamburgerMenuIsInPanelAndKeyboardDriven();
+        TestNoNativeMenuRemains();
+        TestAgentNameHeuristic();
+        TestDirectoryScansFindExecutablesOnly();
+        TestCargoAndPipxParsing();
+        TestDirectoryItemsOnPathAreNotDuplicated();
+        TestRegistryResolvesOffPathBinariesFromInventory();
+        TestRegistryRestoresCachedStatuses();
+        TestRegistryListsAgentCLIs();
+        TestPanelShowsScanningStateOnlyWhileScanning();
         TestCommandCapturesBothStreams();
         TestCommandReportsFailure();
         TestCommandTimeout();

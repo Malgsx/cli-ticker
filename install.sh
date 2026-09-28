@@ -7,7 +7,7 @@ REPO="${CLI_TICKER_REPO:-Malgsx/cli-ticker}"
 APP_NAME="CLITicker"
 INSTALL_DIR="${CLI_TICKER_INSTALL_DIR:-$HOME/Applications}"
 APP_PATH="$INSTALL_DIR/$APP_NAME.app"
-ASSET_URL="https://github.com/$REPO/releases/latest/download/$APP_NAME.app.tar.gz"
+ASSET_URL="${CLI_TICKER_ASSET_URL:-https://github.com/$REPO/releases/latest/download/$APP_NAME.app.tar.gz}"
 
 fail() { echo "error: $*" >&2; exit 1; }
 
@@ -19,7 +19,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 echo "Downloading $ASSET_URL"
 curl -fsSL "$ASSET_URL" -o "$tmpdir/$APP_NAME.app.tar.gz" \
-  || fail "could not download the latest release from github.com/$REPO."
+  || fail "could not download $ASSET_URL."
 tar -xzf "$tmpdir/$APP_NAME.app.tar.gz" -C "$tmpdir"
 [[ -x "$tmpdir/$APP_NAME.app/Contents/MacOS/$APP_NAME" ]] || fail "the release archive does not contain $APP_NAME.app."
 
@@ -40,6 +40,12 @@ version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_
 echo "Installed CLI $version to $APP_PATH"
 
 if [[ "${CLI_TICKER_NO_LAUNCH:-}" != "1" ]]; then
+  # Opening the app is what starts the first scan of this Mac; there is no separate step.
+  first_launch=0
+  [[ -e "$HOME/Library/Application Support/$APP_NAME/inventory.json" ]] || first_launch=1
   open "$APP_PATH"
   echo "CLI is running. Look for its icon in the menu bar."
+  if [[ "$first_launch" == "1" ]]; then
+    echo "First launch: CLI is scanning this Mac for installed CLIs and AI agents. The results stay on this Mac."
+  fi
 fi

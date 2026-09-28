@@ -31,7 +31,11 @@ jobs:
           test -f build/CLITicker.app/Contents/Resources/CLIStatusTemplate.png
           python3 -m json.tool build/CLITicker.app/Contents/Resources/CLIRegistry/registry.json >/dev/null
       - name: Render panel previews
-        run: make previews
+        run: |
+          make previews
+          test -s build/previews/first-run-scan.png
+          test -s build/previews/hamburger-menu.png
+          test -s build/previews/settings-preview.png
       - name: Detect registry CLIs on the runner
         run: |
           build/CLITicker.app/Contents/MacOS/CLITicker --dump-registry build/previews --exercise-update npm
@@ -62,6 +66,81 @@ jobs:
             echo "App exited early." >&2
             exit 1
           fi
+
+  # Installs a few CLIs from different sources, installs this commit's build with install.sh
+  # (which opens the app), and checks that the first-launch scan found them. A second launch
+  # then has to open from the saved results.
+  first-launch-scan:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the release archive
+        run: make dist
+      - name: Install CLIs to detect
+        run: |
+          set -x
+          brew install tree
+          npm install -g @openai/codex
+          command -v pipx || brew install pipx
+          pipx install pycowsay
+          # An agent-looking tool the registry has never heard of, outside the login PATH.
+          mkdir -p ~/.local/share/acme ~/.local/bin
+          printf '#!/bin/sh\necho "acme-agent 0.3.1"\n' > ~/.local/share/acme/acme-agent
+          chmod +x ~/.local/share/acme/acme-agent
+          ln -sf ~/.local/share/acme/acme-agent ~/.local/bin/acme-agent
+          test ! -e ~/Library/Application\ Support/CLITicker
+      - name: Install with install.sh (opens the app, which runs the first scan)
+        run: CLI_TICKER_ASSET_URL="file://$PWD/build/dist/CLITicker.app.tar.gz" bash install.sh | tee install.log
+      - name: Wait for the first scan and check what it found
+        run: |
+          grep -q "First launch: CLI is scanning this Mac" install.log
+          support=~/Library/Application\ Support/CLITicker
+          for _ in $(seq 1 180); do
+            [ -s "$support/inventory.json" ] && [ -s "$support/registry-status.json" ] && break
+            sleep 2
+          done
+          pgrep -x CLITicker >/dev/null || { echo "CLITicker is not running" >&2; exit 1; }
+          python3 - "$support" <<'PY'
+          import json, sys, os
+          support = sys.argv[1]
+          items = json.load(open(os.path.join(support, "inventory.json")))
+          registry = json.load(open(os.path.join(support, "registry-status.json")))
+          have = {(i["source"], i["name"]) for i in items}
+          sources = sorted({i["source"] for i in items})
+          print("sources:", sources)
+          print("registry:", sorted(r["id"] for r in registry))
+          for key in [("Homebrew", "tree"), ("npm global", "@openai/codex"), ("pipx", "pycowsay")]:
+              assert key in have, f"{key} missing from the first scan"
+          assert any(name == "acme-agent" for _, name in have), "~/.local/bin/acme-agent missing from the first scan"
+          assert "codex" in {r["id"] for r in registry}, "codex missing from the CLIs view"
+          PY
+          pkill -x CLITicker
+      - name: Second launch opens from saved results
+        run: |
+          ~/Applications/CLITicker.app/Contents/MacOS/CLITicker --dump-registry out
+          cat out/startup.json out/scan-summary.json
+          python3 - <<'PY'
+          import json
+          startup = json.load(open("out/startup.json"))
+          summary = json.load(open("out/scan-summary.json"))
+          assert startup["firstLaunch"] is False, "second launch should not be a first launch"
+          assert startup["cachedRegistryRows"] > 0 and startup["cachedInventoryItems"] > 0, "second launch should open with saved rows"
+          assert summary["firstRunScanning"] is False
+          agents = {a["title"]: a for a in summary["agents"]}
+          assert "Codex" in agents, "Codex should be in the Agents view"
+          assert agents.get("acme-agent", {}).get("generic") is True, "acme-agent should be shown as a generic agent"
+          assert not any(t.startswith(("gpg", "ssh")) for t in agents), f"key agents listed as AI agents: {list(agents)}"
+          others = {o["title"] for o in summary["otherCLIs"]}
+          assert {"tree", "pycowsay"} <= others, f"unregistered CLIs missing from the CLIs view: {others}"
+          PY
+      - name: Upload scan output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-launch-scan
+          path: |
+            out/*
+            install.log
 
   # The next two jobs run the README commands verbatim on a clean runner. Off main,
   # they are pinned to this commit so the PR's own install.sh / sources are tested.

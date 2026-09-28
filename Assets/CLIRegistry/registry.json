@@ -40,6 +40,13 @@
     {"id": "cursor-agent", "label": "Cursor Agent", "bins": ["cursor-agent"], "icon": "cursor", "via": "self", "selfUpdate": {"executable": "cursor-agent", "arguments": ["update"]}},
     {"id": "claude", "label": "Claude Code", "bins": ["claude"], "icon": "claude", "npm": "@anthropic-ai/claude-code", "cask": "claude-code", "via": "self", "selfUpdate": {"executable": "claude", "arguments": ["update"]}},
     {"id": "codex", "label": "Codex", "bins": ["codex"], "mark": "CX", "npm": "@openai/codex", "cask": "codex", "brew": "codex", "github": "openai/codex"},
-    {"id": "gemini", "label": "Gemini CLI", "bins": ["gemini"], "icon": "googlegemini", "npm": "@google/gemini-cli", "brew": "gemini-cli"}
+    {"id": "gemini", "label": "Gemini CLI", "bins": ["gemini"], "icon": "googlegemini", "npm": "@google/gemini-cli", "brew": "gemini-cli"},
+    {"id": "aider", "label": "Aider", "bins": ["aider"], "mark": "AI", "brew": "aider", "github": "Aider-AI/aider"},
+    {"id": "amp", "label": "Amp", "bins": ["amp"], "mark": "A", "npm": "@sourcegraph/amp"},
+    {"id": "opencode", "label": "OpenCode", "bins": ["opencode"], "mark": "OC", "npm": "opencode-ai", "brew": ["sst/tap/opencode", "opencode"]},
+    {"id": "goose", "label": "Goose", "bins": ["goose"], "mark": "G", "brew": "block-goose-cli", "github": "block/goose"},
+    {"id": "qwen", "label": "Qwen Code", "bins": ["qwen"], "mark": "QW", "npm": "@qwen-code/qwen-code"},
+    {"id": "crush", "label": "Crush", "bins": ["crush"], "mark": "CR", "npm": "@charmland/crush", "brew": ["charmbracelet/tap/crush", "crush"]},
+    {"id": "copilot", "label": "GitHub Copilot CLI", "bins": ["copilot"], "icon": "github", "npm": "@github/copilot"}
   ]
 }
