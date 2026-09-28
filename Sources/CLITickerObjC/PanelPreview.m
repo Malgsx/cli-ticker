@@ -260,13 +260,7 @@ BOOL RenderPanelPreviewsIfRequested(void) {
     [panel setSelectMode:YES];
     [panel setPreviewSelectionKeys:@[@"registry:gh", @"registry:aws"]];
     BOOL selectOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"select-mode.png"], YES);
-    [panel presentUninstallConfirmation:@[
-        @{@"title": @"GitHub CLI", @"command": @"brew uninstall gh", @"state": @"pending"},
-        @{@"title": @"AWS CLI", @"command": @"brew uninstall awscli", @"state": @"pending"},
-        @{@"title": @"cowsay", @"command": @"npm uninstall -g cowsay", @"state": @"pending"},
-        @{@"title": @"tree", @"command": @"brew uninstall tree", @"state": @"pending"}
-    ]];
-    BOOL confirmOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"uninstall-confirm.png"], YES);
+    [panel setSelectMode:NO];
     NSMutableArray *updateCommands = [NSMutableArray arrayWithObjects:
         @"npm install -g @earendil-works/pi-coding-agent",
         @"npm install -g @sourcegraph/amp",
@@ -282,6 +276,16 @@ BOOL RenderPanelPreviewsIfRequested(void) {
     for (NSUInteger i = updateCommands.count; i < 88; i++) [updateCommands addObject:[NSString stringWithFormat:@"brew upgrade pkg-%lu", (unsigned long)i]];
     [panel presentUpdateConfirmationWithTitle:@"Update 88 tools?" detail:@"Opens Ghostty and runs these" commands:updateCommands];
     BOOL updateOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"update-confirm.png"], YES);
+    [panel dismissUpdateConfirmation];
+    [panel setSelectMode:YES];
+    [panel setPreviewSelectionKeys:@[@"registry:gh", @"registry:aws"]];
+    [panel presentUninstallConfirmation:@[
+        @{@"title": @"GitHub CLI", @"command": @"brew uninstall gh", @"state": @"pending"},
+        @{@"title": @"AWS CLI", @"command": @"brew uninstall awscli", @"state": @"pending"},
+        @{@"title": @"cowsay", @"command": @"npm uninstall -g cowsay", @"state": @"pending"},
+        @{@"title": @"tree", @"command": @"brew uninstall tree", @"state": @"pending"}
+    ]];
+    BOOL confirmOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"uninstall-confirm.png"], YES);
 
     fprintf(stderr, "menubar-preview: %s, cli-list-preview: %s, hamburger-menu: %s, settings-preview: %s, first-run-scan: %s, select-mode: %s, uninstall-confirm: %s, update-confirm: %s\n",
             menuBarOK ? "ok" : "failed", listOK ? "ok" : "failed", menuOK ? "ok" : "failed", settingsOK ? "ok" : "failed", scanOK ? "ok" : "failed",

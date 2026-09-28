@@ -91,6 +91,7 @@ NSImage *TickerMonogramIcon(NSString *mark);
 // Wide in-panel confirmation for Update all. commands beyond TickerUpdatePageSize paginate.
 // An empty list shows the explanation with no Update control.
 - (void)presentUpdateConfirmationWithTitle:(NSString *)title detail:(NSString *)detail commands:(NSArray<NSString *> *)commands;
+- (void)dismissUpdateConfirmation;
 - (NSArray<NSString *> *)visibleUpdateCommands;
 - (void)close;
 - (void)reload;
