@@ -19,6 +19,7 @@ jobs:
       - name: Registry icons are build inputs
         run: |
           make -q build/CLITicker.app/Contents/MacOS/CLITicker
+          sleep 2
           touch Assets/CLIRegistry/icons/bun.png
           if make -q build/CLITicker.app/Contents/MacOS/CLITicker; then echo "touching a registry icon did not make the app bundle stale" >&2; exit 1; fi
           make
