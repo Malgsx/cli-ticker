@@ -1,9 +1,11 @@
-# Override any of these on the command line, e.g. `make BUNDLE_ID=com.example.cli`.
-# Changing them does not trigger a rebuild; run `make clean` first.
+# `./cli <command>` is the front door; it runs the targets below.
+# Override any of these on the command line, e.g. `./cli build BUNDLE_ID=com.example.cli`.
+# Changing them does not trigger a rebuild; run `./cli clean` first.
 APP_NAME := CLITicker
 DISPLAY_NAME := CLI
 BUNDLE_ID := local.codex.cliticker
-VERSION := 0.2.0
+# The VERSION file is the only place the version is written down. Releases require the tag to match it.
+VERSION := $(shell cat VERSION)
 # GitHub repo the app checks for its own releases and links to from About.
 REPO := Malgsx/cli-ticker
 # Set to a "Developer ID Application: ..." identity (or "-" for ad-hoc) to sign the bundle.
@@ -18,12 +20,14 @@ SOURCES := $(wildcard Sources/CLITickerObjC/*.m)
 HEADERS := $(wildcard Sources/CLITickerObjC/*.h)
 REGISTRY_ASSETS := Assets/CLIRegistry/registry.json Assets/CLIRegistry/icons $(wildcard Assets/CLIRegistry/icons/*)
 
-.PHONY: all run test previews dist clean icons
+INSTALL_DIR := $(HOME)/Applications
+
+.PHONY: all run test previews dist install uninstall clean icons version help
 
 all: $(BIN)
 
 # The committed .icns is used as-is so a fresh clone builds without Python/Pillow
-# (git checkout mtimes are arbitrary). Run `make icons` after editing the generator.
+# (git checkout mtimes are arbitrary). Run `./cli icons` after editing the generator.
 $(ICON):
 	$(MAKE) icons
 
@@ -31,7 +35,7 @@ icons:
 	python3 scripts/generate_icon_assets.py
 	iconutil -c icns Assets/AppIcon/CLITicker.iconset -o "$(ICON)"
 
-$(BIN): $(SOURCES) $(HEADERS) $(ICON) $(REGISTRY_ASSETS)
+$(BIN): $(SOURCES) $(HEADERS) $(ICON) $(REGISTRY_ASSETS) VERSION
 	mkdir -p "$(APP_DIR)/Contents/MacOS"
 	mkdir -p "$(APP_DIR)/Contents/Resources"
 	mkdir -p "$(APP_DIR)/Contents/Resources/Logos"
@@ -78,5 +82,19 @@ dist: all
 	rm -f "$(BUILD_DIR)/dist/$(APP_NAME).app.tar.gz"
 	tar -C "$(BUILD_DIR)" -czf "$(BUILD_DIR)/dist/$(APP_NAME).app.tar.gz" "$(APP_NAME).app"
 
+# Same steps as the curl installer (quit the running copy, clear quarantine, launch), from this build.
+install: dist
+	CLI_TICKER_ARCHIVE="$(BUILD_DIR)/dist/$(APP_NAME).app.tar.gz" CLI_TICKER_INSTALL_DIR="$(INSTALL_DIR)" bash install.sh
+
+uninstall:
+	pkill -x "$(APP_NAME)" || true
+	rm -rf "$(INSTALL_DIR)/$(APP_NAME).app" "$(HOME)/Library/Application Support/$(APP_NAME)"
+
 clean:
 	rm -rf "$(BUILD_DIR)"
+
+version:
+	@echo "$(VERSION)"
+
+help:
+	@./cli help
