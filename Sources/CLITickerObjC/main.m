@@ -67,36 +67,6 @@ static NSInteger StatusRank(NSString *status) {
     return 2;
 }
 
-static NSSet<NSString *> *AgentToolNames(void) {
-    static NSSet<NSString *> *names;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        names = [NSSet setWithArray:@[
-            @"agent",
-            @"antigravity",
-            @"amp",
-            @"claude",
-            @"codex",
-            @"cora",
-            @"coderabbit",
-            @"cr",
-            @"cursor",
-            @"cursor-agent",
-            @"droid",
-            @"goose",
-            @"hermes",
-            @"kisuke",
-            @"notion",
-            @"ntn",
-            @"opencode",
-            @"pi",
-            @"spawn",
-            @"toad"
-        ]];
-    });
-    return names;
-}
-
 static NSArray<NSString *> *PreferredAgentOrder(void) {
     return @[
         @"codex",
@@ -119,6 +89,16 @@ static NSArray<NSString *> *PreferredAgentOrder(void) {
         @"cr",
         @"pi"
     ];
+}
+
+// Canonical agent names; installed names are mapped here via PackageAliases().
+static NSSet<NSString *> *AgentToolNames(void) {
+    static NSSet<NSString *> *names;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        names = [NSSet setWithArray:PreferredAgentOrder()];
+    });
+    return names;
 }
 
 static NSDictionary<NSString *, NSString *> *PackageAliases(void) {
@@ -243,26 +223,20 @@ static NSTextField *GlassLabel(NSString *text, NSRect frame, NSFont *font, NSCol
     return label;
 }
 
-static BOOL AppExists(NSString *path) {
-    return [[NSFileManager defaultManager] fileExistsAtPath:path];
-}
-
-static NSString *FindApplicationPath(NSArray<NSString *> *appNames) {
-    if (appNames.count == 0) return nil;
-
+static BOOL ApplicationInstalled(NSArray<NSString *> *appNames) {
     NSArray<NSString *> *roots = @[
         @"/Applications",
         [NSHomeDirectory() stringByAppendingPathComponent:@"Applications"]
     ];
     for (NSString *root in roots) {
         for (NSString *name in appNames) {
-            NSString *candidate = [root stringByAppendingPathComponent:name];
-            if (AppExists(candidate)) return candidate;
+            if ([[NSFileManager defaultManager] fileExistsAtPath:[root stringByAppendingPathComponent:name]]) return YES;
         }
     }
-    return nil;
+    return NO;
 }
 
+// Optional terminals in preference order; Terminal.app is always available as the fallback.
 static NSArray<NSDictionary *> *TerminalCandidates(void) {
     return @[
         @{@"name": @"Ghostty", @"apps": @[@"Ghostty.app"]},
@@ -271,11 +245,39 @@ static NSArray<NSDictionary *> *TerminalCandidates(void) {
     ];
 }
 
+static BOOL TerminalInstalled(NSString *terminalName) {
+    for (NSDictionary *terminal in TerminalCandidates()) {
+        if ([terminal[@"name"] isEqualToString:terminalName]) return ApplicationInstalled(terminal[@"apps"]);
+    }
+    return NO;
+}
+
 static NSString *DefaultTerminalName(void) {
     for (NSDictionary *terminal in TerminalCandidates()) {
-        if (FindApplicationPath(terminal[@"apps"])) return terminal[@"name"];
+        if (ApplicationInstalled(terminal[@"apps"])) return terminal[@"name"];
     }
     return @"Terminal";
+}
+
+// Common per-user and Homebrew bin directories where CLIs get installed.
+static NSArray<NSString *> *CommonBinDirectories(void) {
+    NSString *home = NSHomeDirectory();
+    return @[
+        @"/opt/homebrew/bin",
+        @"/usr/local/bin",
+        [home stringByAppendingPathComponent:@".local/bin"],
+        [home stringByAppendingPathComponent:@".npm-global/bin"],
+        [home stringByAppendingPathComponent:@".bun/bin"],
+        [home stringByAppendingPathComponent:@".claude/local/bin"]
+    ];
+}
+
+static void ShowInfoAlert(NSString *title, NSString *message, NSString *buttonTitle) {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = title;
+    alert.informativeText = message;
+    [alert addButtonWithTitle:buttonTitle];
+    [alert runModal];
 }
 
 // Maps a canonical agent name to the executable users actually invoke.
@@ -324,7 +326,7 @@ static NSString *AgentInvocationName(NSString *canonicalName) {
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
 
     for (NSMutableDictionary *item in all) {
-        NSString *key = [NSString stringWithFormat:@"%@:%@", item[@"source"], item[@"name"]];
+        NSString *key = InventoryKey(item);
         NSMutableDictionary *existing = merged[key];
         if (!existing) {
             merged[key] = item;
@@ -682,19 +684,12 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 #pragma mark - Install watcher
 
 - (NSArray<NSString *> *)installWatchPaths {
-    NSString *home = NSHomeDirectory();
-    NSArray<NSString *> *candidates = @[
-        @"/opt/homebrew/bin",
+    NSArray<NSString *> *candidates = [CommonBinDirectories() arrayByAddingObjectsFromArray:@[
         @"/opt/homebrew/Cellar",
         @"/opt/homebrew/Caskroom",
-        @"/usr/local/bin",
         @"/usr/local/Cellar",
-        @"/usr/local/Caskroom",
-        [home stringByAppendingPathComponent:@".local/bin"],
-        [home stringByAppendingPathComponent:@".bun/bin"],
-        [home stringByAppendingPathComponent:@".npm-global/bin"],
-        [home stringByAppendingPathComponent:@".claude/local/bin"]
-    ];
+        @"/usr/local/Caskroom"
+    ]];
 
     NSMutableArray *paths = [NSMutableArray array];
     for (NSString *candidate in candidates) {
@@ -978,36 +973,53 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     return @"";
 }
 
-- (NSTableColumn *)updateTableColumnWithIdentifier:(NSString *)identifier title:(NSString *)title width:(CGFloat)width {
-    NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:identifier];
-    column.title = title;
-    column.width = width;
-    column.minWidth = width;
-    return column;
+// Builds a scrollable single-selection table backed by this controller's data source.
+// `columns` holds @[identifier, title, width] triples.
+- (NSScrollView *)resultsScrollViewWithSize:(NSSize)size rowHeight:(CGFloat)rowHeight doubleAction:(SEL)doubleAction columns:(NSArray<NSArray *> *)columns {
+    NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, size.width, size.height)];
+    scrollView.hasVerticalScroller = YES;
+    scrollView.hasHorizontalScroller = YES;
+    scrollView.borderType = NSBezelBorder;
+
+    NSTableView *tableView = [[NSTableView alloc] initWithFrame:scrollView.contentView.bounds];
+    tableView.usesAlternatingRowBackgroundColors = YES;
+    tableView.allowsMultipleSelection = NO;
+    tableView.rowHeight = rowHeight;
+    tableView.target = self;
+    tableView.doubleAction = doubleAction;
+    tableView.dataSource = (id<NSTableViewDataSource>)self;
+    tableView.delegate = (id<NSTableViewDelegate>)self;
+    for (NSArray *spec in columns) {
+        NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:spec[0]];
+        column.title = spec[1];
+        column.width = [spec[2] doubleValue];
+        column.minWidth = column.width;
+        [tableView addTableColumn:column];
+    }
+    scrollView.documentView = tableView;
+    return scrollView;
 }
 
 - (void)runUpdateForItem:(NSDictionary *)item confirm:(BOOL)confirm {
     NSString *command = [self updateCommandForItem:item];
     if (command.length == 0) {
-        NSAlert *unsupported = [[NSAlert alloc] init];
-        unsupported.messageText = @"Update Not Supported";
-        unsupported.informativeText = @"CLI can apply Homebrew and global npm updates from the menu. Use the package manager directly for this source.";
-        [unsupported addButtonWithTitle:@"OK"];
-        [unsupported runModal];
+        ShowInfoAlert(@"Update Not Supported",
+                      @"CLI can apply Homebrew and global npm updates from the menu. Use the package manager directly for this source.",
+                      @"OK");
         return;
     }
 
     if (confirm) {
         NSAlert *confirmAlert = [[NSAlert alloc] init];
         confirmAlert.messageText = [NSString stringWithFormat:@"Update %@?", item[@"name"] ?: @"this CLI"];
-        confirmAlert.informativeText = [NSString stringWithFormat:@"CLI will open %@ and run:\n\n%@", self.preferredTerminal ?: DefaultTerminalName(), command];
+        confirmAlert.informativeText = [NSString stringWithFormat:@"CLI will open %@ and run:\n\n%@", self.preferredTerminal, command];
         [confirmAlert addButtonWithTitle:@"Update"];
         [confirmAlert addButtonWithTitle:@"Cancel"];
         if ([confirmAlert runModal] != NSAlertFirstButtonReturn) return;
     }
 
     NSString *terminalCommand = [self updateTerminalCommandForItem:item];
-    [self runShellCommand:terminalCommand inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
+    [self runInPreferredTerminal:terminalCommand];
 }
 
 - (void)reloadAllUpdatesDialog {
@@ -1018,7 +1030,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     [self.allUpdatesTableView reloadData];
     self.allUpdatesAlert.messageText = [NSString stringWithFormat:@"All Updates Available (%lu)", updates.count];
     self.allUpdatesAlert.informativeText = updates.count > 0
-        ? [NSString stringWithFormat:@"Double-click an update to run it in %@.", self.preferredTerminal ?: DefaultTerminalName()]
+        ? [NSString stringWithFormat:@"Double-click an update to run it in %@.", self.preferredTerminal]
         : @"All visible updates are current.";
 }
 
@@ -1093,23 +1105,21 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 - (void)updateAll:(id)sender {
     NSArray<NSString *> *commands = [self allUpdateCommands];
     if (commands.count == 0) {
-        NSAlert *unsupported = [[NSAlert alloc] init];
-        unsupported.messageText = @"No Updatable CLIs";
-        unsupported.informativeText = @"None of the outdated tools support in-app updates. Use the package manager directly for these sources.";
-        [unsupported addButtonWithTitle:@"OK"];
-        [unsupported runModal];
+        ShowInfoAlert(@"No Updatable CLIs",
+                      @"None of the outdated tools support in-app updates. Use the package manager directly for these sources.",
+                      @"OK");
         return;
     }
 
     NSAlert *confirmAlert = [[NSAlert alloc] init];
     confirmAlert.messageText = [NSString stringWithFormat:@"Update all %lu CLIs?", commands.count];
-    confirmAlert.informativeText = [NSString stringWithFormat:@"CLI will open %@ and run:\n\n%@", self.preferredTerminal ?: DefaultTerminalName(), [commands componentsJoinedByString:@"\n"]];
+    confirmAlert.informativeText = [NSString stringWithFormat:@"CLI will open %@ and run:\n\n%@", self.preferredTerminal, [commands componentsJoinedByString:@"\n"]];
     [confirmAlert addButtonWithTitle:@"Update All"];
     [confirmAlert addButtonWithTitle:@"Cancel"];
     if ([confirmAlert runModal] != NSAlertFirstButtonReturn) return;
 
     NSString *terminalCommand = [self updateAllTerminalCommandWithCommands:commands];
-    [self runShellCommand:terminalCommand inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
+    [self runInPreferredTerminal:terminalCommand];
 }
 
 - (NSString *)displayNameForItem:(NSDictionary *)item {
@@ -1220,15 +1230,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     NSString *resolved = CommandPath(command);
     if (resolved.length > 0) return resolved;
 
-    NSArray *fallbackDirs = @[
-        @"/opt/homebrew/bin",
-        @"/usr/local/bin",
-        [NSHomeDirectory() stringByAppendingPathComponent:@".local/bin"],
-        [NSHomeDirectory() stringByAppendingPathComponent:@".npm-global/bin"],
-        [NSHomeDirectory() stringByAppendingPathComponent:@".bun/bin"],
-        [NSHomeDirectory() stringByAppendingPathComponent:@".claude/local/bin"]
-    ];
-    for (NSString *dir in fallbackDirs) {
+    for (NSString *dir in CommonBinDirectories()) {
         NSString *candidate = [dir stringByAppendingPathComponent:command];
         if ([[NSFileManager defaultManager] isExecutableFileAtPath:candidate]) return candidate;
     }
@@ -1265,14 +1267,17 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 - (NSArray<NSString *> *)availableTerminals {
     NSMutableArray *terminals = [NSMutableArray arrayWithObject:@"Terminal"];
     for (NSDictionary *terminal in TerminalCandidates()) {
-        if (FindApplicationPath(terminal[@"apps"])) [terminals addObject:terminal[@"name"]];
+        if (ApplicationInstalled(terminal[@"apps"])) [terminals addObject:terminal[@"name"]];
     }
     return terminals;
 }
 
+- (void)runInPreferredTerminal:(NSString *)command {
+    [self runShellCommand:command inTerminal:self.preferredTerminal];
+}
+
 - (void)runShellCommand:(NSString *)command inTerminal:(NSString *)terminal {
-    NSString *ghosttyPath = FindApplicationPath(@[@"Ghostty.app"]);
-    if ([terminal isEqualToString:@"Ghostty"] && ghosttyPath.length > 0) {
+    if ([terminal isEqualToString:@"Ghostty"] && TerminalInstalled(terminal)) {
         RunCommand(@"/usr/bin/osascript", @[
             @"-e", @"on run argv",
             @"-e", @"tell application \"Ghostty\"",
@@ -1288,7 +1293,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         return;
     }
 
-    if ([terminal isEqualToString:@"iTerm"] && FindApplicationPath(@[@"iTerm.app", @"iTerm2.app"])) {
+    if ([terminal isEqualToString:@"iTerm"] && TerminalInstalled(terminal)) {
         NSString *script = [NSString stringWithFormat:
             @"tell application \"iTerm\"\n"
              "activate\n"
@@ -1300,7 +1305,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
         return;
     }
 
-    if ([terminal isEqualToString:@"Warp"] && FindApplicationPath(@[@"Warp.app"])) {
+    if ([terminal isEqualToString:@"Warp"] && TerminalInstalled(terminal)) {
         RunCommand(@"/usr/bin/open", @[@"-a", @"Warp"]);
         NSString *script = [NSString stringWithFormat:
             @"tell application \"System Events\"\n"
@@ -1594,14 +1599,14 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     NSDictionary *item = sender.representedObject;
     if (![item isKindOfClass:[NSDictionary class]]) return;
     NSString *command = [self launchCommandForAgentItem:item];
-    [self runShellCommand:command inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
+    [self runInPreferredTerminal:command];
 }
 
 - (void)openRecentChange:(NSMenuItem *)sender {
     NSDictionary *item = sender.representedObject;
     if (![item isKindOfClass:[NSDictionary class]]) return;
     NSString *command = [self launchCommandForCLIItem:item];
-    [self runShellCommand:command inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
+    [self runInPreferredTerminal:command];
 }
 
 - (NSDictionary *)selectedSearchResultFromTable:(NSTableView *)tableView {
@@ -1615,7 +1620,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     if (!item) return;
 
     NSString *command = [self launchCommandForCLIItem:item];
-    [self runShellCommand:command inTerminal:self.preferredTerminal ?: DefaultTerminalName()];
+    [self runInPreferredTerminal:command];
 }
 
 - (void)copyLaunchScriptForSearchResult:(NSDictionary *)item {
@@ -1630,12 +1635,12 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 - (void)searchCLIs:(id)sender {
     NSAlert *prompt = [[NSAlert alloc] init];
     prompt.messageText = @"Search CLIs";
-    prompt.informativeText = @"Search installed command names, sources, versions, statuses, and paths.";
+    prompt.informativeText = @"Search installed command names and sources.";
     [prompt addButtonWithTitle:@"Search"];
     [prompt addButtonWithTitle:@"Cancel"];
 
     NSSearchField *field = [[NSSearchField alloc] initWithFrame:NSMakeRect(0, 0, 360, 26)];
-    field.placeholderString = @"codex, npm, outdated, /opt/homebrew...";
+    field.placeholderString = @"codex, npm, homebrew...";
     prompt.accessoryView = field;
 
     NSModalResponse response = [prompt runModal];
@@ -1644,40 +1649,30 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     NSString *query = field.stringValue ?: @"";
     NSArray<NSDictionary *> *matches = [self searchItemsMatching:query limit:24];
     if (matches.count == 0) {
-        NSAlert *empty = [[NSAlert alloc] init];
-        empty.messageText = [NSString stringWithFormat:@"No CLIs Found for \"%@\"", query];
-        empty.informativeText = @"Try searching by command name, package manager, version, status, or path.";
-        [empty addButtonWithTitle:@"Done"];
-        [empty runModal];
+        ShowInfoAlert([NSString stringWithFormat:@"No CLIs Found for \"%@\"", query],
+                      @"Try searching by command name or package manager.",
+                      @"Done");
         return;
     }
 
     self.searchResultItems = matches;
 
-    NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 540, 190)];
-    scrollView.hasVerticalScroller = YES;
-    scrollView.hasHorizontalScroller = YES;
-    scrollView.borderType = NSBezelBorder;
-
-    NSTableView *tableView = [[NSTableView alloc] initWithFrame:scrollView.contentView.bounds];
-    tableView.usesAlternatingRowBackgroundColors = YES;
-    tableView.allowsMultipleSelection = NO;
-    tableView.rowHeight = 22;
-    tableView.target = self;
-    tableView.doubleAction = @selector(openSelectedSearchResult:);
-    tableView.dataSource = (id<NSTableViewDataSource>)self;
-    tableView.delegate = (id<NSTableViewDelegate>)self;
-    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"tool" title:@"Tool" width:130]];
-    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"version" title:@"Version" width:78]];
-    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"source" title:@"Source" width:100]];
-    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"command" title:@"Command" width:220]];
-    [tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
-    scrollView.documentView = tableView;
+    NSScrollView *scrollView = [self resultsScrollViewWithSize:NSMakeSize(540, 190)
+                                                     rowHeight:22
+                                                  doubleAction:@selector(openSelectedSearchResult:)
+                                                       columns:@[
+        @[@"tool", @"Tool", @130],
+        @[@"version", @"Version", @78],
+        @[@"source", @"Source", @100],
+        @[@"command", @"Command", @220]
+    ]];
+    NSTableView *tableView = scrollView.documentView;
     self.searchResultsTableView = tableView;
+    [tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
 
     NSAlert *results = [[NSAlert alloc] init];
     results.messageText = [NSString stringWithFormat:@"Search Results for \"%@\"", query];
-    results.informativeText = [NSString stringWithFormat:@"Double-click a CLI to open it in %@, or copy its bash launch script.", self.preferredTerminal ?: DefaultTerminalName()];
+    results.informativeText = [NSString stringWithFormat:@"Double-click a CLI to open it in %@, or copy its bash launch script.", self.preferredTerminal];
     results.accessoryView = scrollView;
     [results addButtonWithTitle:@"Done"];
     [results addButtonWithTitle:@"Copy Bash Script"];
@@ -1694,30 +1689,21 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     if (updates.count == 0) return;
     self.allUpdateItems = updates;
 
-    NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 760, 320)];
-    scrollView.hasVerticalScroller = YES;
-    scrollView.hasHorizontalScroller = YES;
-    scrollView.borderType = NSBezelBorder;
-
-    NSTableView *tableView = [[NSTableView alloc] initWithFrame:scrollView.contentView.bounds];
-    tableView.usesAlternatingRowBackgroundColors = YES;
-    tableView.allowsMultipleSelection = NO;
-    tableView.rowHeight = 24;
-    tableView.target = self;
-    tableView.doubleAction = @selector(updateSelectedFromAllUpdates:);
-    tableView.dataSource = (id<NSTableViewDataSource>)self;
-    tableView.delegate = (id<NSTableViewDelegate>)self;
-    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"tool" title:@"Tool" width:150]];
-    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"current" title:@"Current" width:95]];
-    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"latest" title:@"Latest" width:95]];
-    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"source" title:@"Source" width:120]];
-    [tableView addTableColumn:[self updateTableColumnWithIdentifier:@"command" title:@"Command" width:285]];
-    scrollView.documentView = tableView;
-    self.allUpdatesTableView = tableView;
+    NSScrollView *scrollView = [self resultsScrollViewWithSize:NSMakeSize(760, 320)
+                                                     rowHeight:24
+                                                  doubleAction:@selector(updateSelectedFromAllUpdates:)
+                                                       columns:@[
+        @[@"tool", @"Tool", @150],
+        @[@"current", @"Current", @95],
+        @[@"latest", @"Latest", @95],
+        @[@"source", @"Source", @120],
+        @[@"command", @"Command", @285]
+    ]];
+    self.allUpdatesTableView = scrollView.documentView;
 
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = [NSString stringWithFormat:@"All Updates Available (%lu)", updates.count];
-    alert.informativeText = [NSString stringWithFormat:@"Double-click an update to run it in %@.", self.preferredTerminal ?: DefaultTerminalName()];
+    alert.informativeText = [NSString stringWithFormat:@"Double-click an update to run it in %@.", self.preferredTerminal];
     alert.accessoryView = scrollView;
     self.allUpdatesAlert = alert;
     [alert addButtonWithTitle:@"Done"];
