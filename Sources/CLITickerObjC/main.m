@@ -2020,6 +2020,42 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
     if (RenderPanelPreviewsIfRequested()) return;
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     self.menuController = [[MenuController alloc] init];
+    [self startRegistryDumpIfRequested];
+}
+
+// `--dump-registry <dir>` waits for the first real scan and version checks, then writes
+// registry-status.json and a live render of the CLIs view, and exits. Used by CI.
+- (void)startRegistryDumpIfRequested {
+    NSArray<NSString *> *arguments = [[NSProcessInfo processInfo] arguments];
+    NSUInteger flag = [arguments indexOfObject:@"--dump-registry"];
+    if (flag == NSNotFound || flag + 1 >= arguments.count) return;
+    NSString *directory = arguments[flag + 1];
+    [[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
+    NSDate *started = [NSDate date];
+    __block BOOL sawRefresh = NO;
+    MenuController *controller = self.menuController;
+    [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer) {
+        if (controller.refreshing) sawRefresh = YES;
+        BOOL settled = sawRefresh && !controller.refreshing && !controller.registry.isChecking;
+        BOOL timedOut = -[started timeIntervalSinceNow] > 300;
+        if (!settled && !timedOut) return;
+        [timer invalidate];
+
+        NSMutableArray *rows = [NSMutableArray array];
+        for (NSDictionary *status in controller.registry.statuses) {
+            NSMutableDictionary *row = [NSMutableDictionary dictionary];
+            for (NSString *key in @[@"id", @"title", @"path", @"version", @"latest", @"via", @"state", @"updateCommand"]) {
+                if (status[key]) row[key] = status[key];
+            }
+            [rows addObject:row];
+        }
+        NSData *json = [NSJSONSerialization dataWithJSONObject:rows options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
+        [json writeToFile:[directory stringByAppendingPathComponent:@"registry-status.json"] atomically:YES];
+        controller.panel.selectedViewId = @"clis";
+        WritePanelPreviewPNG([controller.panel renderContentBitmap], [directory stringByAppendingPathComponent:@"cli-list-live.png"], NO);
+        fprintf(stderr, "registry dump: %lu CLIs%s\n", (unsigned long)rows.count, timedOut ? " (timed out)" : "");
+        exit(timedOut ? 1 : 0);
+    }];
 }
 @end
 

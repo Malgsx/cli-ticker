@@ -107,7 +107,7 @@ static void DrawBackdrop(NSRect rect) {
     [gradient drawInRect:rect angle:-90];
 }
 
-static BOOL WritePreview(NSBitmapImageRep *panelBitmap, NSString *path, BOOL withMenuBar) {
+BOOL WritePanelPreviewPNG(NSBitmapImageRep *panelBitmap, NSString *path, BOOL withMenuBar) {
     const CGFloat scale = 2;
     const CGFloat margin = 36;
     const CGFloat menuBarHeight = withMenuBar ? 26 : 0;
@@ -162,15 +162,6 @@ static BOOL WritePreview(NSBitmapImageRep *panelBitmap, NSString *path, BOOL wit
         panelRect = NSMakeRect(panelX, NSMinY(bar) - 4 - panelSize.height, panelSize.width, panelSize.height);
     }
 
-    NSShadow *shadow = [[NSShadow alloc] init];
-    shadow.shadowColor = [NSColor colorWithWhite:0 alpha:0.45];
-    shadow.shadowBlurRadius = 22;
-    shadow.shadowOffset = NSMakeSize(0, -8);
-    [NSGraphicsContext saveGraphicsState];
-    [shadow set];
-    [[NSColor colorWithWhite:0 alpha:0.01] setFill];
-    NSRectFill(panelRect);
-    [NSGraphicsContext restoreGraphicsState];
     [panelBitmap drawInRect:panelRect fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1 respectFlipped:YES hints:nil];
 
     [NSGraphicsContext restoreGraphicsState];
@@ -194,9 +185,9 @@ BOOL RenderPanelPreviewsIfRequested(void) {
     panel.delegate = source;
 
     panel.selectedViewId = @"updates";
-    BOOL menuBarOK = WritePreview([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"menubar-preview.png"], YES);
+    BOOL menuBarOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"menubar-preview.png"], YES);
     panel.selectedViewId = @"clis";
-    BOOL listOK = WritePreview([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"cli-list-preview.png"], NO);
+    BOOL listOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"cli-list-preview.png"], NO);
 
     fprintf(stderr, "menubar-preview: %s, cli-list-preview: %s\n", menuBarOK ? "ok" : "failed", listOK ? "ok" : "failed");
     exit(menuBarOK && listOK ? 0 : 1);

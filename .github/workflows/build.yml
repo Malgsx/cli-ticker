@@ -23,11 +23,16 @@ jobs:
           python3 -m json.tool build/CLITicker.app/Contents/Resources/CLIRegistry/registry.json >/dev/null
       - name: Render panel previews
         run: make previews
+      - name: Detect registry CLIs on the runner
+        run: |
+          build/CLITicker.app/Contents/MacOS/CLITicker --dump-registry build/previews
+          cat build/previews/registry-status.json
       - name: Upload panel previews
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: panel-previews
-          path: build/previews/*.png
+          path: build/previews/*
       - name: Smoke test launch
         run: |
           build/CLITicker.app/Contents/MacOS/CLITicker &
