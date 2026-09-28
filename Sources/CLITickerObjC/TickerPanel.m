@@ -51,6 +51,7 @@ void TickerSelectionClear(NSMutableOrderedSet<NSString *> *selected) {
 }
 
 const NSSize TickerPanelSize = {600, 420};
+const NSUInteger TickerUpdatePageSize = 10;
 
 static const CGFloat ToolbarHeight = 28;
 static const CGFloat FooterHeight = 22;
@@ -788,6 +789,132 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 }
 @end
 
+// Update-all confirmation: a wide card, ten commands to a page, pager along the bottom.
+static const CGFloat UpdateRowHeight = 20;
+
+@interface TickerUpdateSheet : TickerFlippedView
+@property (copy) NSString *heading;
+@property (copy) NSString *detailText;
+@property (copy) NSArray<NSString *> *commands;
+@property NSInteger page;
+@property TickerChipButton *previousButton;
+@property TickerChipButton *nextButton;
+@property TickerChipButton *cancelButton;
+@property TickerChipButton *confirmButton;
+- (NSUInteger)pageCount;
+- (NSArray<NSString *> *)visibleCommands;
+- (void)stepPage:(NSInteger)delta;
+- (void)relayout;
+@end
+
+@implementation TickerUpdateSheet
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+    self.previousButton = [[TickerChipButton alloc] initWithFrame:NSZeroRect];
+    self.nextButton = [[TickerChipButton alloc] initWithFrame:NSZeroRect];
+    self.cancelButton = [[TickerChipButton alloc] initWithFrame:NSZeroRect];
+    self.confirmButton = [[TickerChipButton alloc] initWithFrame:NSZeroRect];
+    self.previousButton.bordered = NO;
+    self.nextButton.bordered = NO;
+    self.cancelButton.bordered = NO;
+    self.confirmButton.bordered = NO;
+    self.previousButton.title = @"‹";
+    self.nextButton.title = @"›";
+    self.cancelButton.title = @"Cancel";
+    self.confirmButton.title = @"Update";
+    for (NSButton *button in @[self.previousButton, self.nextButton, self.cancelButton, self.confirmButton]) {
+        [self addSubview:button];
+    }
+    return self;
+}
+
+- (NSUInteger)pageCount {
+    if (self.commands.count == 0) return 1;
+    return (self.commands.count + TickerUpdatePageSize - 1) / TickerUpdatePageSize;
+}
+
+- (NSArray<NSString *> *)visibleCommands {
+    if (self.commands.count == 0) return @[];
+    NSUInteger start = (NSUInteger)self.page * TickerUpdatePageSize;
+    if (start >= self.commands.count) return @[];
+    NSUInteger length = MIN(TickerUpdatePageSize, self.commands.count - start);
+    return [self.commands subarrayWithRange:NSMakeRange(start, length)];
+}
+
+- (void)stepPage:(NSInteger)delta {
+    NSInteger last = (NSInteger)self.pageCount - 1;
+    self.page = MAX(0, MIN(last, self.page + delta));
+    [self relayout];
+    self.needsDisplay = YES;
+}
+
+- (void)relayout {
+    NSUInteger shown = self.commands.count == 0 ? 2 : MIN(TickerUpdatePageSize, MAX(self.visibleCommands.count, 1));
+    CGFloat width = TickerPanelSize.width - 28;
+    CGFloat height = 62 + shown * UpdateRowHeight + 42;
+    CGFloat available = TickerPanelSize.height - ToolbarHeight - FooterHeight;
+    CGFloat y = ToolbarHeight + MAX(8, floor((available - height) / 2.0));
+    self.frame = NSMakeRect(14, y, width, height);
+
+    CGFloat buttonY = height - 32;
+    self.previousButton.frame = NSMakeRect(16, buttonY, 28, 22);
+    self.nextButton.frame = NSMakeRect(92, buttonY, 28, 22);
+    self.confirmButton.frame = NSMakeRect(width - 96, buttonY, 80, 22);
+    self.cancelButton.frame = NSMakeRect(width - 184, buttonY, 80, 22);
+    BOOL hasCommands = self.commands.count > 0;
+    self.confirmButton.hidden = !hasCommands;
+    self.previousButton.enabled = self.page > 0;
+    self.nextButton.enabled = self.page + 1 < (NSInteger)self.pageCount;
+    self.previousButton.alphaValue = self.previousButton.enabled ? 1 : 0.35;
+    self.nextButton.alphaValue = self.nextButton.enabled ? 1 : 0.35;
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    [SectionTitle(@"Update") drawAtPoint:NSMakePoint(18, 12)];
+    NSDictionary *titleAttributes = @{NSFontAttributeName: TickerFont(13, NSFontWeightSemibold), NSForegroundColorAttributeName: TextBright()};
+    [self.heading ?: @"" drawAtPoint:NSMakePoint(18, 28) withAttributes:titleAttributes];
+    NSDictionary *detailAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: TextDim()};
+    NSString *detail = self.detailText ?: @"";
+    NSSize detailSize = [detail sizeWithAttributes:detailAttributes];
+    [detail drawAtPoint:NSMakePoint(NSWidth(self.bounds) - detailSize.width - 18, 14) withAttributes:detailAttributes];
+
+    NSDictionary *indexAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: TextDim()};
+    NSDictionary *commandAttributes = @{NSFontAttributeName: TickerFont(11, NSFontWeightRegular), NSForegroundColorAttributeName: TextPrimary()};
+    NSArray<NSString *> *visible = [self visibleCommands];
+    if (visible.count == 0) {
+        [@"Nothing here can be updated from the panel." drawAtPoint:NSMakePoint(18, 62) withAttributes:detailAttributes];
+    }
+    NSUInteger start = (NSUInteger)self.page * TickerUpdatePageSize;
+    CGFloat commandLimit = NSWidth(self.bounds) - 64;
+    for (NSUInteger i = 0; i < visible.count; i++) {
+        CGFloat y = 58 + i * UpdateRowHeight;
+        if (i % 2 == 0) {
+            [RGBA(1, 1, 1, 0.025) setFill];
+            NSRectFillUsingOperation(NSMakeRect(10, y, NSWidth(self.bounds) - 20, UpdateRowHeight), NSCompositingOperationSourceOver);
+        }
+        NSString *index = [NSString stringWithFormat:@"%02lu", (unsigned long)(start + i + 1)];
+        [index drawAtPoint:NSMakePoint(18, y + 3) withAttributes:indexAttributes];
+        NSString *command = visible[i];
+        while (command.length > 4 && [command sizeWithAttributes:commandAttributes].width > commandLimit) {
+            command = [[command substringToIndex:command.length - 1] stringByAppendingString:@"…"];
+            // The appended ellipsis can still be too wide; drop one more source character next loop.
+            if ([command sizeWithAttributes:commandAttributes].width > commandLimit && command.length > 4) {
+                command = [[command substringToIndex:command.length - 2] stringByAppendingString:@"…"];
+            }
+        }
+        [command drawAtPoint:NSMakePoint(52, y + 2) withAttributes:commandAttributes];
+    }
+
+    NSString *pageLabel = [NSString stringWithFormat:@"%ld / %lu", (long)(self.page + 1), (unsigned long)self.pageCount];
+    NSDictionary *pageAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: TextSecondary()};
+    NSSize pageSize = [pageLabel sizeWithAttributes:pageAttributes];
+    [pageLabel drawAtPoint:NSMakePoint(48, NSHeight(self.bounds) - 26) withAttributes:pageAttributes];
+    (void)pageSize;
+}
+@end
+
 #pragma mark - Controller
 
 @interface TickerPanelController () <NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate, NSTextFieldDelegate>
@@ -814,6 +941,9 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 @property (readwrite, getter=isSettingsVisible) BOOL settingsVisible;
 @property (readwrite, getter=isSelecting) BOOL selecting;
 @property (readwrite, getter=isUninstallSheetVisible) BOOL uninstallSheetVisible;
+@property (readwrite, getter=isUpdateSheetVisible) BOOL updateSheetVisible;
+@property TickerMenuBackdrop *updateBackdrop;
+@property TickerUpdateSheet *updateSheet;
 @property NSMutableOrderedSet<NSString *> *selectedKeySet;
 @property NSInteger selectionAnchor;
 @property NSButton *selectButton;
@@ -1085,6 +1215,24 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     self.uninstallSheet.confirmButton.target = self;
     self.uninstallSheet.confirmButton.action = @selector(confirmUninstallPressed);
     [self.root addSubview:self.uninstallSheet];
+
+    self.updateBackdrop = [[TickerMenuBackdrop alloc] initWithFrame:frame];
+    self.updateBackdrop.hidden = YES;
+    self.updateBackdrop.clickHandler = ^{ [weakSelf cancelUpdatePressed]; };
+    [self.root addSubview:self.updateBackdrop];
+    self.updateSheet = [[TickerUpdateSheet alloc] initWithFrame:NSZeroRect];
+    self.updateSheet.fillColor = RGBA(0.110, 0.133, 0.169, 1);
+    self.updateSheet.strokeColor = BorderColor();
+    self.updateSheet.hidden = YES;
+    self.updateSheet.previousButton.target = self;
+    self.updateSheet.previousButton.action = @selector(updatePagePrevious);
+    self.updateSheet.nextButton.target = self;
+    self.updateSheet.nextButton.action = @selector(updatePageNext);
+    self.updateSheet.cancelButton.target = self;
+    self.updateSheet.cancelButton.action = @selector(cancelUpdatePressed);
+    self.updateSheet.confirmButton.target = self;
+    self.updateSheet.confirmButton.action = @selector(confirmUpdatePressed);
+    [self.updateBackdrop addSubview:self.updateSheet];
 }
 
 #pragma mark Data
@@ -1120,7 +1268,7 @@ NSImage *TickerMonogramIcon(NSString *mark) {
         [self.tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:NO];
     }
 
-    NSString *label = self.selecting ? @"select" : (self.settingsVisible ? @"settings" : [view[@"label"] lowercaseString]);
+    NSString *label = self.updateSheetVisible ? @"update" : (self.selecting ? @"select" : (self.settingsVisible ? @"settings" : [view[@"label"] lowercaseString]));
     if ([self isSearching]) label = [NSString stringWithFormat:@"search/%@", query];
     self.pathLabel.stringValue = [NSString stringWithFormat:@"~/cli/%@", label ?: @""];
     NSArray *columns = view[@"columns"];
@@ -1155,6 +1303,13 @@ NSImage *TickerMonogramIcon(NSString *mark) {
         [self.uninstallSheet setNeedsLayout:YES];
         [self.uninstallSheet layoutSubtreeIfNeeded];
         self.uninstallSheet.needsDisplay = YES;
+    }
+    if (self.updateSheetVisible) {
+        [self.root addSubview:self.updateBackdrop positioned:NSWindowAbove relativeTo:nil];
+        self.updateBackdrop.hidden = NO;
+        self.updateSheet.hidden = NO;
+        [self.updateSheet relayout];
+        self.updateSheet.needsDisplay = YES;
     }
     [self layoutMenu];
 
@@ -1421,6 +1576,7 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 }
 
 - (BOOL)control:(NSControl *)control textView:(NSTextView *)textView doCommandBySelector:(SEL)commandSelector {
+    if (self.updateSheetVisible) return [self updateSheetCommand:commandSelector];
     if (self.menuVisible) return [self menuCommand:commandSelector];
     if (self.settingsVisible && ![self isSearching]) return [self settingsCommand:commandSelector];
     NSInteger selected = self.tableView.selectedRow;
@@ -1507,7 +1663,8 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 
 // Esc peels back one layer: menu, then settings, then the panel itself.
 - (void)cancel {
-    if (self.uninstallSheetVisible) [self cancelUninstallPressed];
+    if (self.updateSheetVisible) [self cancelUpdatePressed];
+    else if (self.uninstallSheetVisible) [self cancelUninstallPressed];
     else if (self.menuVisible) [self hideMenu];
     else if (self.settingsVisible) [self hideSettings];
     else if (self.selecting) [self setSelectMode:NO];
@@ -1615,7 +1772,13 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 }
 
 - (void)refreshPressed:(id)sender { [self.delegate tickerPanel:self performCommand:TickerCommandRefresh]; }
-- (void)updateAllPressed:(id)sender { [self.delegate tickerPanel:self performCommand:TickerCommandUpdateAll]; }
+- (void)updateAllPressed:(id)sender {
+    if (self.updateSheetVisible) {
+        [self confirmUpdatePressed];
+        return;
+    }
+    [self.delegate tickerPanel:self performCommand:TickerCommandUpdateAll];
+}
 - (void)markdownPressed:(id)sender { [self.delegate tickerPanel:self performCommand:TickerCommandMarkdownReport]; }
 - (void)jsonPressed:(id)sender { [self.delegate tickerPanel:self performCommand:TickerCommandJSONReport]; }
 - (void)menuPressed:(id)sender { [self toggleMenu]; }
@@ -1723,6 +1886,80 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     [self.uninstallSheet setNeedsLayout:YES];
     [self.uninstallSheet layoutSubtreeIfNeeded];
     self.uninstallSheet.needsDisplay = YES;
+}
+
+- (BOOL)updateSheetCommand:(SEL)commandSelector {
+    if (commandSelector == @selector(moveLeft:) || commandSelector == @selector(moveUp:)) {
+        [self.updateSheet stepPage:-1];
+        return YES;
+    }
+    if (commandSelector == @selector(moveRight:) || commandSelector == @selector(moveDown:)) {
+        [self.updateSheet stepPage:1];
+        return YES;
+    }
+    if (commandSelector == @selector(insertNewline:)) {
+        [self confirmUpdatePressed];
+        return YES;
+    }
+    if (commandSelector == @selector(cancelOperation:)) {
+        [self cancelUpdatePressed];
+        return YES;
+    }
+    return YES;
+}
+
+- (void)updatePagePrevious { [self.updateSheet stepPage:-1]; }
+- (void)updatePageNext { [self.updateSheet stepPage:1]; }
+
+- (NSUInteger)updatePage {
+    return self.updateSheetVisible ? (NSUInteger)self.updateSheet.page + 1 : 0;
+}
+
+- (NSUInteger)updatePageCount {
+    return self.updateSheet.pageCount;
+}
+
+- (NSArray<NSString *> *)visibleUpdateCommands {
+    return [self.updateSheet visibleCommands];
+}
+
+- (void)presentUpdateConfirmationWithTitle:(NSString *)title detail:(NSString *)detail commands:(NSArray<NSString *> *)commands {
+    self.menuVisible = NO;
+    [self layoutMenu];
+    self.updateSheet.heading = title ?: @"";
+    self.updateSheet.detailText = detail ?: @"";
+    self.updateSheet.commands = commands ?: @[];
+    self.updateSheet.page = 0;
+    self.updateSheet.cancelButton.title = commands.count > 0 ? @"Cancel" : @"Close";
+    [self.updateSheet relayout];
+    self.updateBackdrop.hidden = NO;
+    self.updateSheet.hidden = NO;
+    self.updateSheetVisible = YES;
+    [self.root addSubview:self.updateBackdrop positioned:NSWindowAbove relativeTo:nil];
+    self.updateSheet.needsDisplay = YES;
+    self.pathLabel.stringValue = @"~/cli/update";
+}
+
+- (void)dismissUpdateConfirmation {
+    self.updateBackdrop.hidden = YES;
+    self.updateSheet.hidden = YES;
+    self.updateSheetVisible = NO;
+    self.updateSheet.commands = @[];
+}
+
+- (void)cancelUpdatePressed {
+    if (!self.updateSheetVisible) return;
+    [self dismissUpdateConfirmation];
+    [self reload];
+}
+
+- (void)confirmUpdatePressed {
+    if (!self.updateSheetVisible || self.updateSheet.commands.count == 0) return;
+    NSArray<NSString *> *commands = [self.updateSheet.commands copy];
+    [self dismissUpdateConfirmation];
+    if ([self.delegate respondsToSelector:@selector(tickerPanel:confirmUpdateCommands:)]) {
+        [self.delegate tickerPanel:self confirmUpdateCommands:commands];
+    }
 }
 
 - (void)dismissUninstallSheet {
@@ -1839,6 +2076,7 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 }
 
 - (void)close {
+    [self dismissUpdateConfirmation];
     self.menuVisible = NO;
     self.settingsVisible = NO;
     [self layoutMenu];

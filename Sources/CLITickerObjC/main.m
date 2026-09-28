@@ -1873,25 +1873,21 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
     return count;
 }
 
-- (void)updateAll:(id)sender {
+// The download button and Update all open this inside the panel. Ten commands per page.
+- (void)presentSupportedUpdates {
     NSArray<NSString *> *commands = [self allUpdateCommands];
     if (commands.count == 0) {
-        ShowInfoAlert(@"No Supported Updates",
-                      @"None of the outdated tools support in-app updates. Use the package manager directly for these sources.",
-                      @"OK");
+        [self.panel presentUpdateConfirmationWithTitle:@"No supported updates" detail:@"These need a manual update." commands:@[]];
         return;
     }
-
     NSUInteger supportedUpdates = [self supportedUpdateItemCount];
-    NSAlert *confirmAlert = [[NSAlert alloc] init];
-    confirmAlert.messageText = [NSString stringWithFormat:@"Update %lu Supported %@?", supportedUpdates, supportedUpdates == 1 ? @"Tool" : @"Tools"];
-    confirmAlert.informativeText = [NSString stringWithFormat:@"CLI will open %@ and run:\n\n%@", self.preferredTerminal, [commands componentsJoinedByString:@"\n"]];
-    [confirmAlert addButtonWithTitle:@"Update"];
-    [confirmAlert addButtonWithTitle:@"Cancel"];
-    if ([confirmAlert runModal] != NSAlertFirstButtonReturn) return;
+    NSString *title = [NSString stringWithFormat:@"Update %lu %@?", supportedUpdates, supportedUpdates == 1 ? @"tool" : @"tools"];
+    NSString *detail = [NSString stringWithFormat:@"Opens %@ and runs these", self.preferredTerminal ?: @"Terminal"];
+    [self.panel presentUpdateConfirmationWithTitle:title detail:detail commands:commands];
+}
 
-    NSString *terminalCommand = [self updateAllTerminalCommandWithCommands:commands];
-    [self runInPreferredTerminal:terminalCommand];
+- (void)updateAll:(id)sender {
+    [self presentSupportedUpdates];
 }
 
 - (NSString *)displayNameForItem:(NSDictionary *)item {
@@ -2381,9 +2377,7 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
     NSString *kind = row[@"kind"];
     NSDictionary *item = row[@"item"];
     if ([kind isEqualToString:@"updateAll"]) {
-        [panel close];
-        [NSApp activateIgnoringOtherApps:YES];
-        [self updateAll:nil];
+        [self presentSupportedUpdates];
         return;
     }
     if ([kind isEqualToString:@"update"] && item) {
@@ -2406,6 +2400,11 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
     }];
 }
 
+- (void)tickerPanel:(TickerPanelController *)panel confirmUpdateCommands:(NSArray<NSString *> *)commands {
+    if (commands.count == 0) return;
+    [self runInPreferredTerminal:[self updateAllTerminalCommandWithCommands:commands]];
+}
+
 - (void)tickerPanel:(TickerPanelController *)panel pressButtonOnRow:(NSDictionary *)row {
     // The row button is the only path that starts a registry update.
     if ([row[@"kind"] isEqualToString:@"registry"]) [self.registry runUpdateForStatus:row];
@@ -2426,11 +2425,12 @@ static void DispatchTerminalLaunch(NSString *command, NSString *terminal) {
         [self.registry refreshWithInventory:self.items force:YES];
         return;
     }
-    [panel close];
     if ([command isEqualToString:TickerCommandUpdateAll]) {
-        [NSApp activateIgnoringOtherApps:YES];
-        [self updateAll:nil];
-    } else if ([command isEqualToString:TickerCommandJSONReport]) {
+        [self presentSupportedUpdates];
+        return;
+    }
+    [panel close];
+    if ([command isEqualToString:TickerCommandJSONReport]) {
         [self openJSONReport:nil];
     } else if ([command isEqualToString:TickerCommandMarkdownReport]) {
         [self openMarkdownReport:nil];
