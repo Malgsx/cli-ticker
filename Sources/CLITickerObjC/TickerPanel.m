@@ -1216,8 +1216,9 @@ static const CGFloat UpdateRowHeight = 20;
     self.uninstallSheet.confirmButton.action = @selector(confirmUninstallPressed);
     [self.root addSubview:self.uninstallSheet];
 
-    self.updateBackdrop = [[TickerMenuBackdrop alloc] initWithFrame:frame];
+    self.updateBackdrop = [[TickerMenuBackdrop alloc] initWithFrame:NSMakeRect(0, 0, TickerPanelSize.width, TickerPanelSize.height)];
     self.updateBackdrop.hidden = YES;
+    __weak typeof(self) weakSelf = self;
     self.updateBackdrop.clickHandler = ^{ [weakSelf cancelUpdatePressed]; };
     [self.root addSubview:self.updateBackdrop];
     self.updateSheet = [[TickerUpdateSheet alloc] initWithFrame:NSZeroRect];
