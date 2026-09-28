@@ -106,7 +106,7 @@
     NSArray *registryRows = [self registryRows];
     NSArray *menu = @[
         @{@"command": TickerCommandUpdateAll, @"title": @"Update all", @"detail": @"9 updates", @"shortcut": @"⌘U", @"emphasis": @YES},
-        @{@"command": TickerCommandRefresh, @"title": @"Check for updates / rescan", @"detail": @"scanned 4m ago", @"shortcut": @"⌘R"},
+        @{@"command": TickerCommandRefresh, @"title": @"Check for updates / rescan", @"detail": @"4m ago", @"shortcut": @"⌘R"},
         @{@"command": TickerCommandUpdateApp, @"title": @"Version", @"detail": @"0.2.0 · update → 0.3.0", @"emphasis": @YES, @"separator": @YES},
         @{@"command": TickerCommandSettings, @"title": @"Settings", @"shortcut": @"⌘,"},
         @{@"command": TickerCommandMarkdownReport, @"title": @"Open report", @"detail": @"inventory.md", @"shortcut": @"⌘O", @"separator": @YES},

@@ -699,7 +699,7 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     self.menuBackdrop.clickHandler = ^{ [weakSelf hideMenu]; };
     [root addSubview:self.menuBackdrop];
     self.menuView = [[TickerMenuView alloc] initWithFrame:NSMakeRect(TickerPanelSize.width - MenuWidth - 8, ToolbarHeight - 2, MenuWidth, 100)];
-    self.menuView.fillColor = RGBA(0.125, 0.149, 0.188, 0.98);
+    self.menuView.fillColor = RGBA(0.125, 0.149, 0.188, 1);
     self.menuView.strokeColor = BorderColor();
     self.menuView.hidden = YES;
     self.menuView.activateHandler = ^(NSInteger index) { [weakSelf activateMenuItemAtIndex:index]; };

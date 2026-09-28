@@ -330,6 +330,11 @@ static void TestPanelShowsScanningStateOnlyWhileScanning(void) {
 - (void)cancel;
 @end
 
+static void PressKey(TickerPanelController *panel, SEL command) {
+    NSTextField *field = [panel valueForKey:@"searchField"];
+    [panel control:field textView:[[NSTextView alloc] init] doCommandBySelector:command];
+}
+
 static void TestHamburgerMenuIsInPanelAndKeyboardDriven(void) {
     [NSApplication sharedApplication];
     MenuPanelSource *source = [[MenuPanelSource alloc] init];
@@ -346,33 +351,33 @@ static void TestHamburgerMenuIsInPanelAndKeyboardDriven(void) {
     Assert(NSHeight(menuView.frame) > 4 * 22, @"the menu should size to its items");
     Assert(NSContainsRect(panel.panel.contentView.bounds, menuView.frame), @"the menu should sit inside the panel");
 
-    [panel control:nil textView:nil doCommandBySelector:@selector(moveDown:)];
-    [panel control:nil textView:nil doCommandBySelector:@selector(insertNewline:)];
+    PressKey(panel, @selector(moveDown:));
+    PressKey(panel, @selector(insertNewline:));
     Assert([source.commands isEqualToArray:@[TickerCommandRefresh]], @"down + return should run the second item");
     Assert(!panel.menuVisible && menuView.hidden, @"activating an item should close the menu");
 
     [panel menuPressed:nil];
-    [panel control:nil textView:nil doCommandBySelector:@selector(moveUp:)];
-    [panel control:nil textView:nil doCommandBySelector:@selector(insertNewline:)];
+    PressKey(panel, @selector(moveUp:));
+    PressKey(panel, @selector(insertNewline:));
     Assert([source.commands.lastObject isEqualToString:TickerCommandQuit], @"up from the first item should wrap to the last");
 
     [panel menuPressed:nil];
-    [panel control:nil textView:nil doCommandBySelector:@selector(cancelOperation:)];
+    PressKey(panel, @selector(cancelOperation:));
     Assert(!panel.menuVisible, @"esc should close the menu");
     Assert(source.commands.count == 2, @"esc should not run anything");
 
     [panel menuPressed:nil];
-    [panel control:nil textView:nil doCommandBySelector:@selector(moveDown:)];
-    [panel control:nil textView:nil doCommandBySelector:@selector(moveDown:)];
-    [panel control:nil textView:nil doCommandBySelector:@selector(insertNewline:)];
+    PressKey(panel, @selector(moveDown:));
+    PressKey(panel, @selector(moveDown:));
+    PressKey(panel, @selector(insertNewline:));
     NSView *settingsView = [panel valueForKey:@"settingsView"];
     Assert(panel.settingsVisible && !settingsView.hidden, @"Settings should open the inline settings view");
     Assert(source.commands.count == 2, @"Settings is handled by the panel, not sent as a command");
 
-    [panel control:nil textView:nil doCommandBySelector:@selector(moveDown:)];
-    [panel control:nil textView:nil doCommandBySelector:@selector(moveRight:)];
-    [panel control:nil textView:nil doCommandBySelector:@selector(moveUp:)];
-    [panel control:nil textView:nil doCommandBySelector:@selector(moveLeft:)];
+    PressKey(panel, @selector(moveDown:));
+    PressKey(panel, @selector(moveRight:));
+    PressKey(panel, @selector(moveUp:));
+    PressKey(panel, @selector(moveLeft:));
     Assert([source.settingChanges isEqualToArray:@[@"refreshInterval=off", @"terminal=Ghostty"]], [NSString stringWithFormat:@"arrow keys should change settings: %@", source.settingChanges]);
 
     [panel cancel];

@@ -1155,7 +1155,7 @@ static void InstallWatchCallback(ConstFSEventStreamRef streamRef,
 - (NSArray<NSDictionary *> *)panelMenuItems {
     NSUInteger updates = [self supportedUpdateItemCount];
     NSDate *scanned = [[NSFileManager defaultManager] attributesOfItemAtPath:self.reportURL.path error:nil].fileModificationDate;
-    NSString *scanDetail = self.refreshing ? @"scanning…" : (scanned ? [NSString stringWithFormat:@"scanned %@", [self relativeTimeForTimestamp:scanned.timeIntervalSince1970]] : @"");
+    NSString *scanDetail = self.refreshing ? @"scanning…" : (scanned ? [self relativeTimeForTimestamp:scanned.timeIntervalSince1970] : @"");
     NSString *versionDetail = [self appUpdateAvailable]
         ? [NSString stringWithFormat:@"%@ · update → %@", AppVersion(), self.latestAppVersion]
         : (self.latestAppVersion ? [NSString stringWithFormat:@"%@ · latest", AppVersion()] : AppVersion());
