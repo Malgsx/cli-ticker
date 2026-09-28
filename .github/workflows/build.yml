@@ -59,6 +59,8 @@ jobs:
           test -s build/previews/first-run-scan.png
           test -s build/previews/hamburger-menu.png
           test -s build/previews/settings-preview.png
+          test -s build/previews/select-mode.png
+          test -s build/previews/uninstall-confirm.png
       - name: Detect registry CLIs on the runner
         run: |
           build/CLITicker.app/Contents/MacOS/CLITicker --dump-registry build/previews --exercise-update npm
@@ -169,6 +171,48 @@ jobs:
           path: |
             out/*
             install.log
+
+  # Installs throwaway CLIs on a clean runner and removes them through the app's uninstall harness.
+  uninstall-exercise:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install throwaway CLIs
+        run: |
+          set -x
+          brew install tree
+          npm install -g cowsay
+          echo "$(npm prefix -g)/bin" >> "$GITHUB_PATH"
+          export PATH="$(npm prefix -g)/bin:$PATH"
+          command -v tree
+          command -v cowsay
+      - name: Build
+        run: ./cli build
+      - name: Uninstall them through the test harness
+        run: |
+          build/CLITicker.app/Contents/MacOS/CLITicker --exercise-uninstall "$RUNNER_TEMP/uninstall" tree cowsay
+          python3 - "$RUNNER_TEMP/uninstall" <<'PY'
+          import json, sys
+          directory = sys.argv[1]
+          plans = {p["name"]: p for p in json.load(open(f"{directory}/uninstall-plans.json"))["plans"]}
+          result = json.load(open(f"{directory}/uninstall-result.json"))
+          assert plans["tree"]["command"] == "brew uninstall tree", plans["tree"]
+          assert plans["cowsay"]["command"] == "npm uninstall -g cowsay", plans["cowsay"]
+          assert result["remaining"] == [], result["remaining"]
+          by_name = {row["name"]: row for row in result["results"]}
+          assert by_name["tree"]["exit"] == 0 and by_name["cowsay"]["exit"] == 0, result
+          print("harness removed", sorted(by_name))
+          PY
+          if command -v tree >/dev/null; then echo "tree is still on PATH" >&2; exit 1; fi
+          if command -v cowsay >/dev/null; then echo "cowsay is still on PATH" >&2; exit 1; fi
+          if npm ls -g --depth=0 cowsay >/dev/null 2>&1; then echo "cowsay is still installed globally" >&2; exit 1; fi
+          echo "tree and cowsay are gone"
+      - name: Upload uninstall report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uninstall-exercise
+          path: ${{ runner.temp }}/uninstall/*
 
   # The next two jobs run the README commands verbatim on a clean runner. Off main,
   # they are pinned to this commit so the PR's own install.sh / sources are tested.

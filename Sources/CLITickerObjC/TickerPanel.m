@@ -8,6 +8,47 @@ NSString *const TickerCommandSettings = @"settings";
 NSString *const TickerCommandUpdateApp = @"updateApp";
 NSString *const TickerCommandOpenGitHub = @"openGitHub";
 NSString *const TickerCommandQuit = @"quit";
+NSString *const TickerCommandSelect = @"select";
+
+NSString *TickerSelectionKey(NSDictionary *row) {
+    NSString *key = row[@"selectionKey"];
+    return [key isKindOfClass:[NSString class]] && key.length > 0 ? key : nil;
+}
+
+BOOL TickerRowIsSelectable(NSDictionary *row) {
+    NSDictionary *action = row[@"uninstallAction"];
+    return TickerSelectionKey(row) != nil
+        && [action[@"executable"] isKindOfClass:[NSString class]]
+        && [action[@"arguments"] isKindOfClass:[NSArray class]];
+}
+
+void TickerSelectionClick(NSMutableOrderedSet<NSString *> *selected, NSArray<NSDictionary *> *rows, NSInteger index, BOOL extendRange, NSInteger *anchor) {
+    if (index < 0 || index >= (NSInteger)rows.count || !TickerRowIsSelectable(rows[index])) return;
+    if (extendRange && anchor && *anchor >= 0 && *anchor < (NSInteger)rows.count) {
+        NSInteger lower = MIN(*anchor, index);
+        NSInteger upper = MAX(*anchor, index);
+        for (NSInteger i = lower; i <= upper; i++) {
+            if (!TickerRowIsSelectable(rows[i])) continue;
+            [selected addObject:TickerSelectionKey(rows[i])];
+        }
+        return;
+    }
+    NSString *key = TickerSelectionKey(rows[index]);
+    if ([selected containsObject:key]) [selected removeObject:key];
+    else [selected addObject:key];
+    if (anchor) *anchor = index;
+}
+
+void TickerSelectionSelectAll(NSMutableOrderedSet<NSString *> *selected, NSArray<NSDictionary *> *rows) {
+    for (NSDictionary *row in rows) {
+        if (!TickerRowIsSelectable(row)) continue;
+        [selected addObject:TickerSelectionKey(row)];
+    }
+}
+
+void TickerSelectionClear(NSMutableOrderedSet<NSString *> *selected) {
+    [selected removeAllObjects];
+}
 
 const NSSize TickerPanelSize = {600, 420};
 
@@ -550,7 +591,7 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     NSBezierPath *path = [NSBezierPath bezierPathWithRect:frame];
     path.lineWidth = 1;
     [path stroke];
-    NSDictionary *attributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: TextBright()};
+    NSDictionary *attributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: self.enabled ? TextBright() : TextDim()};
     NSSize size = [self.title sizeWithAttributes:attributes];
     [self.title drawAtPoint:NSMakePoint((NSWidth(self.bounds) - size.width) / 2.0, (NSHeight(self.bounds) - size.height) / 2.0) withAttributes:attributes];
 }
@@ -565,6 +606,9 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 @property NSTextField *metaLabel;
 @property TickerChipButton *actionButton;
 @property NSProgressIndicator *spinner;
+@property BOOL showsCheckbox;
+@property BOOL checkboxOn;
+@property BOOL checkboxEnabled;
 @end
 
 @implementation TickerCellView
@@ -597,11 +641,12 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     CGFloat width = NSWidth(self.bounds);
     CGFloat height = NSHeight(self.bounds);
     CGFloat textY = (height - 15) / 2.0;
-    self.iconView.frame = NSMakeRect(10, (height - 14) / 2.0, 14, 14);
+    CGFloat inset = self.showsCheckbox ? 16 : 0;
+    self.iconView.frame = NSMakeRect(10 + inset, (height - 14) / 2.0, 14, 14);
     CGFloat statusX = width - StatusColumnWidth - 8;
     CGFloat viaX = statusX - ViaColumnWidth - 4;
     CGFloat versionX = viaX - VersionColumnWidth - 4;
-    self.titleLabel.frame = NSMakeRect(32, textY, versionX - 36, 15);
+    self.titleLabel.frame = NSMakeRect(32 + inset, textY, MAX(0, versionX - 36 - inset), 15);
     self.detailLabel.frame = NSMakeRect(versionX, textY, VersionColumnWidth, 15);
     self.viaLabel.frame = NSMakeRect(viaX, textY, ViaColumnWidth, 15);
     self.metaLabel.frame = NSMakeRect(statusX, textY, StatusColumnWidth, 15);
@@ -609,6 +654,138 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     self.spinner.frame = NSMakeRect(statusX + 6, (height - 12) / 2.0, 12, 12);
 }
 
+- (void)drawRect:(NSRect)dirtyRect {
+    if (!self.showsCheckbox) return;
+    NSRect box = NSMakeRect(6, (NSHeight(self.bounds) - 11) / 2.0, 11, 11);
+    [(self.checkboxEnabled ? BorderColor() : TextDim()) setStroke];
+    NSBezierPath *path = [NSBezierPath bezierPathWithRect:NSInsetRect(box, 0.5, 0.5)];
+    path.lineWidth = 1;
+    [path stroke];
+    if (!self.checkboxOn) return;
+    NSDictionary *attributes = @{NSFontAttributeName: TickerFont(9, NSFontWeightSemibold), NSForegroundColorAttributeName: self.checkboxEnabled ? TextBright() : TextDim()};
+    [@"✓" drawAtPoint:NSMakePoint(NSMinX(box) + 1, NSMinY(box) - 1) withAttributes:attributes];
+}
+
+@end
+
+// Confirmation sheet drawn over the list: every CLI, the exact command, then per-row results.
+@interface TickerUninstallRows : NSView
+@property NSArray<NSDictionary *> *plans;
+@end
+
+@implementation TickerUninstallRows
+- (BOOL)isFlipped { return YES; }
+- (void)drawRect:(NSRect)dirtyRect {
+    NSDictionary *titleAttributes = @{NSFontAttributeName: TickerFont(11, NSFontWeightRegular), NSForegroundColorAttributeName: TextPrimary()};
+    NSDictionary *commandAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: TextSecondary()};
+    NSDictionary *okAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: SuccessColor()};
+    NSDictionary *badAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: FailureColor()};
+    NSDictionary *runAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: TextBright()};
+    for (NSUInteger i = 0; i < self.plans.count; i++) {
+        NSDictionary *plan = self.plans[i];
+        CGFloat y = i * 22;
+        if (i % 2 == 1) {
+            [RGBA(1, 1, 1, 0.025) setFill];
+            NSRectFillUsingOperation(NSMakeRect(0, y, NSWidth(self.bounds), 22), NSCompositingOperationSourceOver);
+        }
+        NSString *title = plan[@"title"] ?: @"";
+        [title drawAtPoint:NSMakePoint(14, y + 4) withAttributes:titleAttributes];
+        NSString *state = plan[@"state"] ?: @"pending";
+        NSString *trailing = plan[@"command"] ?: @"";
+        NSDictionary *trailingAttributes = commandAttributes;
+        if ([state isEqualToString:@"running"]) {
+            trailing = @"running…";
+            trailingAttributes = runAttributes;
+        } else if ([state isEqualToString:@"removed"]) {
+            trailing = @"removed";
+            trailingAttributes = okAttributes;
+        } else if ([state isEqualToString:@"failed"]) {
+            NSString *detail = plan[@"detail"] ?: @"failed";
+            trailing = [detail isEqualToString:@"failed"] ? @"failed" : [NSString stringWithFormat:@"failed · %@", detail];
+            trailingAttributes = badAttributes;
+        }
+        NSSize size = [trailing sizeWithAttributes:trailingAttributes];
+        CGFloat maxWidth = NSWidth(self.bounds) - 180;
+        if (size.width > maxWidth && maxWidth > 20) {
+            while (trailing.length > 4 && [[trailing stringByAppendingString:@"…"] sizeWithAttributes:trailingAttributes].width > maxWidth) {
+                trailing = [trailing substringToIndex:trailing.length - 1];
+            }
+            trailing = [trailing stringByAppendingString:@"…"];
+            size = [trailing sizeWithAttributes:trailingAttributes];
+        }
+        [trailing drawAtPoint:NSMakePoint(NSWidth(self.bounds) - size.width - 12, y + 5) withAttributes:trailingAttributes];
+    }
+}
+@end
+
+@interface TickerUninstallSheet : TickerFlippedView
+@property (nonatomic, copy) NSArray<NSDictionary *> *plans;
+@property BOOL running;
+@property BOOL finished;
+@property TickerChipButton *cancelButton;
+@property TickerChipButton *confirmButton;
+@property NSScrollView *scrollView;
+@property TickerUninstallRows *rowsView;
+@end
+
+@implementation TickerUninstallSheet
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+    self.scrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    self.scrollView.drawsBackground = NO;
+    self.scrollView.hasVerticalScroller = YES;
+    self.scrollView.autohidesScrollers = YES;
+    self.scrollView.scrollerStyle = NSScrollerStyleOverlay;
+    self.scrollView.scrollerKnobStyle = NSScrollerKnobStyleLight;
+    self.rowsView = [[TickerUninstallRows alloc] initWithFrame:NSZeroRect];
+    self.scrollView.documentView = self.rowsView;
+    [self addSubview:self.scrollView];
+
+    self.cancelButton = [[TickerChipButton alloc] initWithFrame:NSZeroRect];
+    self.cancelButton.bordered = NO;
+    self.cancelButton.title = @"Cancel";
+    self.confirmButton = [[TickerChipButton alloc] initWithFrame:NSZeroRect];
+    self.confirmButton.bordered = NO;
+    self.confirmButton.title = @"Uninstall";
+    [self addSubview:self.cancelButton];
+    [self addSubview:self.confirmButton];
+    return self;
+}
+
+- (void)setPlans:(NSArray<NSDictionary *> *)plans {
+    _plans = [plans copy];
+    self.rowsView.plans = _plans;
+    self.rowsView.needsDisplay = YES;
+    self.needsDisplay = YES;
+}
+
+- (void)layout {
+    [super layout];
+    CGFloat width = NSWidth(self.bounds);
+    CGFloat height = NSHeight(self.bounds);
+    self.cancelButton.frame = NSMakeRect(width - 196, height - 32, 88, 22);
+    self.confirmButton.frame = NSMakeRect(width - 100, height - 32, 88, 22);
+    self.scrollView.frame = NSMakeRect(8, 58, MAX(0, width - 16), MAX(0, height - 58 - 44));
+    CGFloat rowHeight = MAX(self.plans.count * 22, NSHeight(self.scrollView.frame));
+    self.rowsView.frame = NSMakeRect(0, 0, NSWidth(self.scrollView.frame), rowHeight);
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    [SectionTitle(@"Uninstall") drawAtPoint:NSMakePoint(22, 14)];
+    NSUInteger count = self.plans.count;
+    NSString *title = self.finished
+        ? @"Uninstall finished"
+        : (self.running ? [NSString stringWithFormat:@"Uninstalling %lu %@…", count, count == 1 ? @"CLI" : @"CLIs"]
+                        : [NSString stringWithFormat:@"Uninstall %lu %@?", count, count == 1 ? @"CLI" : @"CLIs"]);
+    NSDictionary *titleAttributes = @{NSFontAttributeName: TickerFont(13, NSFontWeightSemibold), NSForegroundColorAttributeName: TextBright()};
+    [title drawAtPoint:NSMakePoint(22, 30) withAttributes:titleAttributes];
+    NSString *hint = self.finished ? @"Rescanning this Mac." : (self.running ? @"Running each command in order." : @"Nothing is removed until you confirm.");
+    NSDictionary *hintAttributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular), NSForegroundColorAttributeName: TextDim()};
+    NSSize hintSize = [hint sizeWithAttributes:hintAttributes];
+    [hint drawAtPoint:NSMakePoint(NSWidth(self.bounds) - hintSize.width - 22, 16) withAttributes:hintAttributes];
+}
 @end
 
 #pragma mark - Controller
@@ -635,6 +812,18 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 @property TickerSettingsView *settingsView;
 @property (readwrite, getter=isMenuVisible) BOOL menuVisible;
 @property (readwrite, getter=isSettingsVisible) BOOL settingsVisible;
+@property (readwrite, getter=isSelecting) BOOL selecting;
+@property (readwrite, getter=isUninstallSheetVisible) BOOL uninstallSheetVisible;
+@property NSMutableOrderedSet<NSString *> *selectedKeySet;
+@property NSInteger selectionAnchor;
+@property NSButton *selectButton;
+@property TickerChipButton *selectAllButton;
+@property TickerChipButton *clearButton;
+@property TickerChipButton *footerUninstall;
+@property TickerUninstallSheet *uninstallSheet;
+@property NSMutableArray<NSMutableDictionary *> *uninstallPlans;
+@property BOOL uninstallRunning;
+@property BOOL uninstallFinished;
 @property id globalMonitor;
 @property NSDate *lastResignDate;
 @property (weak) NSStatusBarButton *statusButton;
@@ -646,8 +835,14 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     self = [super init];
     if (!self) return nil;
     self.selectedViewId = @"clis";
+    self.selectedKeySet = [NSMutableOrderedSet orderedSet];
+    self.selectionAnchor = -1;
     [self buildPanel];
     return self;
+}
+
+- (NSOrderedSet<NSString *> *)selectedKeys {
+    return [self.selectedKeySet copy];
 }
 
 - (void)buildPanel {
@@ -750,9 +945,11 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     self.searchField.delegate = self;
     [searchBox addSubview:self.searchField];
 
+    self.selectButton = [self toolbarButton:@"checkmark.square" tooltip:@"Select CLIs to uninstall" action:@selector(selectPressed:)];
     NSArray *buttons = @[
         [self toolbarButton:@"arrow.clockwise" tooltip:@"Rescan this Mac for CLIs and agents (⌘R)" action:@selector(refreshPressed:)],
         [self toolbarButton:@"arrow.down.to.line" tooltip:@"Update all supported tools" action:@selector(updateAllPressed:)],
+        self.selectButton,
         [self toolbarButton:@"doc.text" tooltip:@"Open Markdown report" action:@selector(markdownPressed:)],
         [self toolbarButton:@"curlybraces" tooltip:@"Open JSON report" action:@selector(jsonPressed:)],
         [self toolbarButton:@"line.3.horizontal" tooltip:@"Menu (right-click the menu bar icon)" action:@selector(menuPressed:)],
@@ -795,7 +992,19 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     self.headerVia.frame = NSMakeRect(viaX, 3, ViaColumnWidth, 14);
     self.headerStatus = TickerLabel(@"Status", headerFont, TextDim(), NSTextAlignmentRight);
     self.headerStatus.frame = NSMakeRect(statusX, 3, StatusColumnWidth, 14);
-    for (NSView *view in @[self.headerTitle, self.headerVersion, self.headerVia, self.headerStatus]) [header addSubview:view];
+    self.selectAllButton = [[TickerChipButton alloc] initWithFrame:NSMakeRect(width - 148, 1, 78, 18)];
+    self.selectAllButton.bordered = NO;
+    self.selectAllButton.title = @"Select all";
+    self.selectAllButton.target = self;
+    self.selectAllButton.action = @selector(selectAllPressed:);
+    self.selectAllButton.hidden = YES;
+    self.clearButton = [[TickerChipButton alloc] initWithFrame:NSMakeRect(width - 66, 1, 54, 18)];
+    self.clearButton.bordered = NO;
+    self.clearButton.title = @"Clear";
+    self.clearButton.target = self;
+    self.clearButton.action = @selector(clearSelectionPressed:);
+    self.clearButton.hidden = YES;
+    for (NSView *view in @[self.headerTitle, self.headerVersion, self.headerVia, self.headerStatus, self.selectAllButton, self.clearButton]) [header addSubview:view];
     [self.root addSubview:header];
 
     CGFloat listY = ToolbarHeight + HeaderHeight;
@@ -858,6 +1067,24 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     self.footerRight = TickerLabel(@"", TickerFont(10, NSFontWeightRegular), TextSecondary(), NSTextAlignmentRight);
     self.footerRight.frame = NSMakeRect(SidebarWidth + 110, y + 4, width - SidebarWidth - 122, 14);
     [self.root addSubview:self.footerRight];
+
+    self.footerUninstall = [[TickerChipButton alloc] initWithFrame:NSMakeRect(118, y + 2, 78, 18)];
+    self.footerUninstall.bordered = NO;
+    self.footerUninstall.title = @"Uninstall";
+    self.footerUninstall.target = self;
+    self.footerUninstall.action = @selector(uninstallFooterPressed);
+    self.footerUninstall.hidden = YES;
+    [self.root addSubview:self.footerUninstall];
+
+    self.uninstallSheet = [[TickerUninstallSheet alloc] initWithFrame:NSMakeRect(SidebarWidth + 1, ToolbarHeight, TickerPanelSize.width - SidebarWidth - 2, TickerPanelSize.height - ToolbarHeight - FooterHeight)];
+    self.uninstallSheet.fillColor = RGBA(0.125, 0.149, 0.188, 1);
+    self.uninstallSheet.strokeColor = BorderColor();
+    self.uninstallSheet.hidden = YES;
+    self.uninstallSheet.cancelButton.target = self;
+    self.uninstallSheet.cancelButton.action = @selector(cancelUninstallPressed);
+    self.uninstallSheet.confirmButton.target = self;
+    self.uninstallSheet.confirmButton.action = @selector(confirmUninstallPressed);
+    [self.root addSubview:self.uninstallSheet];
 }
 
 #pragma mark Data
@@ -893,7 +1120,8 @@ NSImage *TickerMonogramIcon(NSString *mark) {
         [self.tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:NO];
     }
 
-    NSString *label = [self isSearching] ? [NSString stringWithFormat:@"search/%@", query] : (self.settingsVisible ? @"settings" : [view[@"label"] lowercaseString]);
+    NSString *label = self.selecting ? @"select" : (self.settingsVisible ? @"settings" : [view[@"label"] lowercaseString]);
+    if ([self isSearching]) label = [NSString stringWithFormat:@"search/%@", query];
     self.pathLabel.stringValue = [NSString stringWithFormat:@"~/cli/%@", label ?: @""];
     NSArray *columns = view[@"columns"];
     if ([self isSearching]) columns = @[@"Name ·", @"Version", @"Via", @"Source"];
@@ -905,10 +1133,10 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     }
 
     NSDictionary *stats = self.snapshot[@"stats"];
-    self.footerLeft.stringValue = [NSString stringWithFormat:@"%lu items", (unsigned long)self.rows.count];
     self.footerBar.values = @[stats[@"current"] ?: @0, stats[@"outdated"] ?: @0, stats[@"unknown"] ?: @0];
     self.footerBar.needsDisplay = YES;
     self.footerRight.stringValue = self.snapshot[@"status"] ?: @"";
+    [self updateSelectionChrome];
 
     NSDictionary *scanning = self.snapshot[@"scanning"];
     self.scanView.state = [scanning isKindOfClass:[NSDictionary class]] ? scanning : nil;
@@ -920,7 +1148,14 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     self.settingsView.selectedIndex = MIN(MAX(self.settingsView.selectedIndex, 0), MAX((NSInteger)self.settingsView.settings.count - 1, 0));
     self.settingsView.hidden = !self.settingsVisible || [self isSearching];
     self.settingsView.needsDisplay = YES;
-    if (self.settingsVisible) self.footerLeft.stringValue = [NSString stringWithFormat:@"%lu settings", (unsigned long)self.settingsView.settings.count];
+    if (self.settingsVisible && !self.selecting) self.footerLeft.stringValue = [NSString stringWithFormat:@"%lu settings", (unsigned long)self.settingsView.settings.count];
+    if (self.uninstallSheetVisible) {
+        [self.root addSubview:self.uninstallSheet positioned:NSWindowAbove relativeTo:nil];
+        self.uninstallSheet.hidden = NO;
+        [self.uninstallSheet setNeedsLayout:YES];
+        [self.uninstallSheet layoutSubtreeIfNeeded];
+        self.uninstallSheet.needsDisplay = YES;
+    }
     [self layoutMenu];
 
     [self rebuildSidebar];
@@ -1010,6 +1245,12 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     return cell;
 }
 
+- (NSString *)shortUninstallReason:(NSString *)reason {
+    if ([reason containsString:@"Apple"]) return @"system";
+    if ([reason containsString:@"app"]) return @"in app";
+    return @"manual";
+}
+
 - (void)configureCell:(TickerCellView *)cell withRow:(NSDictionary *)row {
     NSImage *icon = row[@"icon"];
     cell.iconView.image = icon;
@@ -1026,8 +1267,25 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     cell.metaLabel.hidden = NO;
     [cell.spinner stopAnimation:nil];
     cell.toolTip = row[@"tooltip"];
+    BOOL selectable = TickerRowIsSelectable(row);
+    BOOL hasReason = [row[@"uninstallReason"] isKindOfClass:[NSString class]] && [row[@"uninstallReason"] length] > 0;
+    cell.showsCheckbox = self.selecting && (selectable || hasReason || TickerSelectionKey(row) != nil);
+    cell.checkboxOn = selectable && [self.selectedKeySet containsObject:TickerSelectionKey(row)];
+    cell.checkboxEnabled = selectable;
+    if (self.selecting && !selectable && hasReason) {
+        cell.metaLabel.stringValue = [self shortUninstallReason:row[@"uninstallReason"]];
+        cell.metaLabel.textColor = TextDim();
+        cell.toolTip = row[@"uninstallReason"];
+    }
+    [cell setNeedsLayout:YES];
+    cell.needsDisplay = YES;
 
     if ([row[@"kind"] isEqualToString:@"registry"]) [self configureRegistryCell:cell withRow:row];
+    if (self.selecting && !selectable && hasReason) {
+        cell.actionButton.hidden = YES;
+        cell.metaLabel.hidden = NO;
+        cell.metaLabel.stringValue = [self shortUninstallReason:row[@"uninstallReason"]];
+    }
 }
 
 - (void)configureRegistryCell:(TickerCellView *)cell withRow:(NSDictionary *)row {
@@ -1086,10 +1344,42 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     return self.rows[index];
 }
 
+- (BOOL)eventHitActionButton {
+    NSEvent *event = NSApp.currentEvent;
+    if (!event || !self.tableView.window) return NO;
+    NSView *view = [self.tableView.window.contentView hitTest:event.locationInWindow];
+    while (view && view != self.tableView) {
+        if ([view isKindOfClass:[NSButton class]]) return YES;
+        view = view.superview;
+    }
+    return NO;
+}
+
+- (void)handleRowClickAtIndex:(NSInteger)index shift:(BOOL)shift {
+    if (self.uninstallSheetVisible || index < 0) return;
+    if (self.selecting) {
+        TickerSelectionClick(self.selectedKeySet, self.rows, index, shift, &_selectionAnchor);
+        [self reloadVisibleRowsKeepingHighlight:index];
+        [self updateSelectionChrome];
+        return;
+    }
+    NSDictionary *row = [self rowAtIndex:index];
+    if (row) [self.delegate tickerPanel:self activateRow:row];
+}
+
+- (void)reloadVisibleRowsKeepingHighlight:(NSInteger)index {
+    NSInteger selected = index >= 0 ? index : self.tableView.selectedRow;
+    [self.tableView reloadData];
+    if (selected >= 0 && selected < (NSInteger)self.rows.count) {
+        [self.tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:selected] byExtendingSelection:NO];
+        [self.tableView scrollRowToVisible:selected];
+    }
+}
+
 - (void)rowClicked:(NSTableView *)sender {
-    NSDictionary *row = [self rowAtIndex:sender.clickedRow];
-    if (!row) return;
-    [self.delegate tickerPanel:self activateRow:row];
+    if ([self eventHitActionButton]) return;
+    BOOL shift = (NSApp.currentEvent.modifierFlags & NSEventModifierFlagShift) != 0;
+    [self handleRowClickAtIndex:sender.clickedRow shift:shift];
 }
 
 // Reused cell views can outlive a reload that reorders rows, so resolve the row at press time.
@@ -1144,11 +1434,20 @@ NSImage *TickerMonogramIcon(NSString *mark) {
         return YES;
     }
     if (commandSelector == @selector(insertNewline:)) {
+        if (self.uninstallSheetVisible) return YES;
+        if (self.selecting) {
+            [self handleRowClickAtIndex:selected shift:NO];
+            return YES;
+        }
         NSDictionary *row = [self rowAtIndex:selected];
         if (row) [self.delegate tickerPanel:self activateRow:row];
         return YES;
     }
     if (commandSelector == @selector(cancelOperation:)) {
+        if (self.uninstallSheetVisible) {
+            [self cancelUninstallPressed];
+            return YES;
+        }
         if (self.searchField.stringValue.length > 0) {
             self.searchField.stringValue = @"";
             [self reload];
@@ -1208,8 +1507,10 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 
 // Esc peels back one layer: menu, then settings, then the panel itself.
 - (void)cancel {
-    if (self.menuVisible) [self hideMenu];
+    if (self.uninstallSheetVisible) [self cancelUninstallPressed];
+    else if (self.menuVisible) [self hideMenu];
     else if (self.settingsVisible) [self hideSettings];
+    else if (self.selecting) [self setSelectMode:NO];
     else [self close];
 }
 
@@ -1220,6 +1521,8 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     [self hideMenu];
     if ([command isEqualToString:TickerCommandSettings]) {
         [self showSettings];
+    } else if ([command isEqualToString:TickerCommandSelect]) {
+        [self setSelectMode:!self.selecting];
     } else if (command.length > 0) {
         [self.delegate tickerPanel:self performCommand:command];
     }
@@ -1302,6 +1605,12 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     if ([characters isEqualToString:@"f"]) { [self.panel makeFirstResponder:self.searchField]; return YES; }
     if ([characters isEqualToString:@","]) { [self showSettings]; return YES; }
     if ([characters isEqualToString:@"o"]) { [self markdownPressed:nil]; return YES; }
+    if ([characters isEqualToString:@"a"]) {
+        if (!self.selecting) [self setSelectMode:YES];
+        [self selectAllPressed:nil];
+        return YES;
+    }
+    if ([characters isEqualToString:@"s"]) { [self setSelectMode:!self.selecting]; return YES; }
     return NO;
 }
 
@@ -1311,6 +1620,175 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 - (void)jsonPressed:(id)sender { [self.delegate tickerPanel:self performCommand:TickerCommandJSONReport]; }
 - (void)menuPressed:(id)sender { [self toggleMenu]; }
 - (void)quitPressed:(id)sender { [self.delegate tickerPanel:self performCommand:TickerCommandQuit]; }
+- (void)selectPressed:(id)sender { [self setSelectMode:!self.selecting]; }
+
+- (void)updateSelectionChrome {
+    self.selectButton.contentTintColor = self.selecting ? TextBright() : TextSecondary();
+    self.selectAllButton.hidden = !self.selecting;
+    self.clearButton.hidden = !self.selecting;
+    self.headerStatus.hidden = self.selecting;
+    CGFloat inset = self.selecting ? 16 : 0;
+    NSRect title = self.headerTitle.frame;
+    title.origin.x = 32 + inset;
+    title.size.width = MAX(0, NSMinX(self.headerVersion.frame) - title.origin.x - 4);
+    self.headerTitle.frame = title;
+    BOOL showUninstall = self.selecting && !self.settingsVisible;
+    self.footerUninstall.hidden = !showUninstall;
+    self.footerBar.hidden = showUninstall;
+    self.footerRight.hidden = showUninstall;
+    if (showUninstall) {
+        NSString *summary = [NSString stringWithFormat:@"%lu selected · Uninstall", (unsigned long)self.selectedKeySet.count];
+        self.footerLeft.hidden = YES;
+        self.footerUninstall.title = summary;
+        NSDictionary *attributes = @{NSFontAttributeName: TickerFont(10, NSFontWeightRegular)};
+        CGFloat textWidth = MAX(120, ceil([summary sizeWithAttributes:attributes].width) + 16);
+        self.footerUninstall.frame = NSMakeRect(8, TickerPanelSize.height - FooterHeight + 2, textWidth, 18);
+        self.footerUninstall.enabled = self.selectedKeySet.count > 0;
+    } else {
+        self.footerLeft.hidden = NO;
+        if (!self.settingsVisible) {
+            self.footerLeft.stringValue = [NSString stringWithFormat:@"%lu items", (unsigned long)self.rows.count];
+            self.footerLeft.frame = NSMakeRect(12, TickerPanelSize.height - FooterHeight + 4, 150, 14);
+        }
+    }
+}
+
+- (void)setSelectMode:(BOOL)enabled {
+    if (self.selecting == enabled) {
+        [self updateSelectionChrome];
+        return;
+    }
+    self.selecting = enabled;
+    self.selectionAnchor = -1;
+    if (!enabled) {
+        TickerSelectionClear(self.selectedKeySet);
+        [self dismissUninstallSheet];
+    }
+    [self reload];
+}
+
+- (void)setPreviewSelectionKeys:(NSArray<NSString *> *)keys {
+    [self.selectedKeySet removeAllObjects];
+    for (NSString *key in keys) if (key.length > 0) [self.selectedKeySet addObject:key];
+    [self reload];
+}
+
+- (void)selectAllPressed:(id)sender {
+    TickerSelectionSelectAll(self.selectedKeySet, self.rows);
+    [self reloadVisibleRowsKeepingHighlight:self.tableView.selectedRow];
+    [self updateSelectionChrome];
+}
+
+- (void)clearSelectionPressed:(id)sender {
+    TickerSelectionClear(self.selectedKeySet);
+    self.selectionAnchor = -1;
+    [self reloadVisibleRowsKeepingHighlight:self.tableView.selectedRow];
+    [self updateSelectionChrome];
+}
+
+- (NSArray<NSMutableDictionary *> *)plansForSelectedRows {
+    NSMutableArray<NSDictionary *> *candidates = [NSMutableArray array];
+    for (NSDictionary *view in [self views]) {
+        NSArray *rows = view[@"rows"];
+        if ([rows isKindOfClass:[NSArray class]]) [candidates addObjectsFromArray:rows];
+    }
+    [candidates addObjectsFromArray:self.rows];
+    NSMutableArray<NSMutableDictionary *> *plans = [NSMutableArray array];
+    NSMutableSet *seen = [NSMutableSet set];
+    for (NSDictionary *row in candidates) {
+        NSString *key = TickerSelectionKey(row);
+        if (!key || ![self.selectedKeySet containsObject:key] || [seen containsObject:key] || !TickerRowIsSelectable(row)) continue;
+        [seen addObject:key];
+        [plans addObject:[@{
+            @"key": key,
+            @"title": row[@"title"] ?: key,
+            @"command": row[@"uninstallCommand"] ?: @"",
+            @"action": row[@"uninstallAction"],
+            @"state": @"pending"
+        } mutableCopy]];
+    }
+    return plans;
+}
+
+- (void)showUninstallSheet {
+    self.uninstallSheet.plans = self.uninstallPlans;
+    self.uninstallSheet.running = self.uninstallRunning;
+    self.uninstallSheet.finished = self.uninstallFinished;
+    self.uninstallSheet.cancelButton.hidden = self.uninstallFinished;
+    self.uninstallSheet.confirmButton.title = self.uninstallFinished ? @"Done" : @"Uninstall";
+    self.uninstallSheet.confirmButton.enabled = !self.uninstallRunning;
+    self.uninstallSheet.hidden = NO;
+    self.uninstallSheetVisible = YES;
+    [self.root addSubview:self.uninstallSheet positioned:NSWindowAbove relativeTo:nil];
+    [self.uninstallSheet setNeedsLayout:YES];
+    [self.uninstallSheet layoutSubtreeIfNeeded];
+    self.uninstallSheet.needsDisplay = YES;
+}
+
+- (void)dismissUninstallSheet {
+    self.uninstallSheet.hidden = YES;
+    self.uninstallSheetVisible = NO;
+    self.uninstallRunning = NO;
+    self.uninstallFinished = NO;
+    self.uninstallPlans = nil;
+}
+
+- (void)presentUninstallConfirmation:(NSArray<NSDictionary *> *)plans {
+    NSMutableArray *mutable = [NSMutableArray array];
+    for (NSDictionary *plan in plans) [mutable addObject:[plan mutableCopy]];
+    self.uninstallPlans = mutable;
+    self.uninstallRunning = NO;
+    self.uninstallFinished = NO;
+    [self showUninstallSheet];
+}
+
+- (void)uninstallFooterPressed {
+    if (!self.selecting || self.uninstallSheetVisible) return;
+    NSArray *plans = [self plansForSelectedRows];
+    if (plans.count == 0) return;
+    [self presentUninstallConfirmation:plans];
+}
+
+- (void)cancelUninstallPressed {
+    if (self.uninstallRunning && !self.uninstallFinished) return;
+    [self dismissUninstallSheet];
+}
+
+- (void)confirmUninstallPressed {
+    if (!self.uninstallSheetVisible) return;
+    if (self.uninstallFinished) {
+        [self dismissUninstallSheet];
+        [self setSelectMode:NO];
+        return;
+    }
+    if (self.uninstallRunning || self.uninstallPlans.count == 0) return;
+    if (![self.delegate respondsToSelector:@selector(tickerPanel:runUninstallPlans:progress:completion:)]) return;
+    self.uninstallRunning = YES;
+    self.uninstallSheet.running = YES;
+    self.uninstallSheet.confirmButton.enabled = NO;
+    self.uninstallSheet.needsDisplay = YES;
+    __weak typeof(self) weakSelf = self;
+    [self.delegate tickerPanel:self runUninstallPlans:self.uninstallPlans progress:^(NSUInteger index, NSString *state, NSString *detail) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || index >= strongSelf.uninstallPlans.count) return;
+        NSMutableDictionary *plan = strongSelf.uninstallPlans[index];
+        plan[@"state"] = state ?: @"";
+        if (detail.length > 0) plan[@"detail"] = detail;
+        strongSelf.uninstallSheet.plans = strongSelf.uninstallPlans;
+        [strongSelf.uninstallSheet.rowsView setNeedsDisplay:YES];
+    } completion:^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        strongSelf.uninstallRunning = NO;
+        strongSelf.uninstallFinished = YES;
+        strongSelf.uninstallSheet.running = NO;
+        strongSelf.uninstallSheet.finished = YES;
+        strongSelf.uninstallSheet.cancelButton.hidden = YES;
+        strongSelf.uninstallSheet.confirmButton.title = @"Done";
+        strongSelf.uninstallSheet.confirmButton.enabled = YES;
+        strongSelf.uninstallSheet.needsDisplay = YES;
+    }];
+}
 
 #pragma mark Window
 

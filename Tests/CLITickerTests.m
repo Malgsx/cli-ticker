@@ -389,6 +389,200 @@ static void TestNoNativeMenuRemains(void) {
     Assert(![MenuController instancesRespondToSelector:NSSelectorFromString(@"rebuildMenu")], @"the classic NSMenu builder should be gone");
 }
 
+static NSDictionary *SelectableRow(NSString *key, NSString *title) {
+    return @{@"kind": @"cli", @"title": title, @"selectionKey": key,
+             @"uninstallCommand": [NSString stringWithFormat:@"brew uninstall %@", title],
+             @"uninstallAction": @{@"executable": @"brew", @"arguments": @[@"uninstall", title]}};
+}
+
+static void TestSelectionLogic(void) {
+    NSArray *rows = @[SelectableRow(@"a", @"tree"), @{@"kind": @"cli", @"title": @"git", @"selectionKey": @"b", @"uninstallReason": @"Apple system tool"}, SelectableRow(@"c", @"cowsay")];
+    NSMutableOrderedSet *selected = [NSMutableOrderedSet orderedSet];
+    NSInteger anchor = -1;
+    TickerSelectionClick(selected, rows, 1, NO, &anchor);
+    Assert(selected.count == 0 && anchor == -1, @"an unselectable row cannot be toggled");
+    TickerSelectionClick(selected, rows, 0, NO, &anchor);
+    Assert([selected.array isEqualToArray:@[@"a"]] && anchor == 0, @"click selects a row and sets the anchor");
+    TickerSelectionClick(selected, rows, 0, NO, &anchor);
+    Assert(selected.count == 0 && anchor == 0, @"click again clears that row");
+    TickerSelectionClick(selected, rows, 0, NO, &anchor);
+    TickerSelectionClick(selected, rows, 2, YES, &anchor);
+    Assert(selected.count == 2 && [selected containsObject:@"a"] && [selected containsObject:@"c"], @"shift-click selects the range and skips unselectable rows");
+    TickerSelectionClear(selected);
+    TickerSelectionSelectAll(selected, rows);
+    Assert(selected.count == 2 && [selected containsObject:@"a"] && [selected containsObject:@"c"], @"select all skips rows without a safe uninstall");
+    TickerSelectionClear(selected);
+    Assert(selected.count == 0, @"clear removes every selection");
+}
+
+static void TestUninstallPlans(void) {
+    NSDictionary *brew = UninstallPlanForItem(@{@"name": @"tree", @"source": @"Homebrew"});
+    Assert([brew[@"command"] isEqualToString:@"brew uninstall tree"], @"brew formulae uninstall with brew uninstall");
+    Assert([brew[@"action"][@"arguments"] isEqualToArray:@[@"uninstall", @"tree"]], @"brew uninstall stays argv");
+
+    NSDictionary *cask = UninstallPlanForItem(@{@"name": @"docker", @"source": @"Homebrew Cask"});
+    Assert([cask[@"command"] isEqualToString:@"brew uninstall --cask docker"], @"casks pass --cask");
+
+    NSDictionary *npm = UninstallPlanForItem(@{@"name": @"cowsay", @"source": @"npm global"});
+    Assert([npm[@"command"] isEqualToString:@"npm uninstall -g cowsay"], @"npm globals use npm uninstall -g");
+
+    NSDictionary *pipx = UninstallPlanForItem(@{@"name": @"pycowsay", @"source": @"pipx"});
+    Assert([pipx[@"command"] isEqualToString:@"pipx uninstall pycowsay"], @"pipx has its own uninstall");
+
+    NSDictionary *uv = UninstallPlanForItem(@{@"name": @"ruff", @"source": @"uv tool"});
+    Assert([uv[@"command"] isEqualToString:@"uv tool uninstall ruff"], @"uv tools use uv tool uninstall");
+
+    NSDictionary *cargo = UninstallPlanForItem(@{@"name": @"ripgrep", @"source": @"cargo"});
+    Assert([cargo[@"command"] isEqualToString:@"cargo uninstall ripgrep"], @"cargo uninstalls the crate name");
+
+    NSDictionary *bun = UninstallPlanForItem(@{@"name": @"prettier", @"source": @"Bun global"});
+    Assert([bun[@"command"] isEqualToString:@"bun uninstall -g prettier"], @"bun globals use bun uninstall -g");
+
+    NSDictionary *extension = UninstallPlanForItem(@{@"name": @"owner/gh-foo", @"source": @"gh extension"});
+    Assert([extension[@"command"] isEqualToString:@"gh extension remove owner/gh-foo"], @"gh extensions use gh extension remove");
+
+    NSDictionary *go = UninstallPlanForItem(@{@"name": @"goreleaser", @"source": @"go", @"path": @"/Users/x/go/bin/goreleaser"});
+    Assert([go[@"action"][@"executable"] isEqualToString:@"/bin/rm"], @"go binaries are removed as a single file");
+    Assert([go[@"action"][@"arguments"] isEqualToArray:@[@"/Users/x/go/bin/goreleaser"]], @"go removal does not recurse");
+    Assert(UninstallPlanForItem(@{@"name": @"go", @"source": @"go", @"path": @"/usr/local/bin/go"})[@"reason"] != nil, @"a go binary outside GOBIN is not removed");
+
+    Assert([UninstallPlanForItem(@{@"name": @"git", @"source": @"PATH", @"path": @"/usr/bin/git"})[@"reason"] isEqualToString:@"Apple system tool"], @"Apple system tools are unselectable");
+    Assert([UninstallPlanForItem(@{@"name": @"editor", @"source": @"App bundle", @"path": @"/Applications/Editor.app/Contents/Resources/bin/editor"})[@"reason"] isEqualToString:@"bundled inside an app"], @"app-bundled CLIs are unselectable");
+    Assert(UninstallPlanForItem(@{@"name": @"tool", @"source": @"PATH", @"path": @"/opt/homebrew/bin/tool"})[@"action"] == nil, @"a PATH entry without a package manager is not removed");
+    Assert([UninstallPlanForItem(@{@"name": @"tool", @"source": @"~/.local/bin", @"path": @"/Users/x/.local/bin/tool"})[@"reason"] isEqualToString:@"no safe uninstall for this install method"], @"loose binaries have no safe uninstall");
+
+    NSString *sentinel = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
+    NSString *name = [NSString stringWithFormat:@"tool'; touch '%@'; #", sentinel];
+    NSDictionary *injected = UninstallPlanForItem(@{@"name": name, @"source": @"npm global"});
+    Assert([injected[@"action"][@"arguments"] lastObject] == name, @"package name stays one uninstall argument");
+    NSString *output = nil;
+    int code = ExecuteArgvAction(@{@"executable": @"/usr/bin/printf", @"arguments": @[@"%s", name]}, 5, &output);
+    Assert(code == 0 && [output isEqualToString:name], @"argv uninstall must not interpret the package name");
+    Assert(![[NSFileManager defaultManager] fileExistsAtPath:sentinel], @"uninstall arguments must not execute shell syntax");
+    Assert(ExecuteArgvAction(@{@"script": @"echo unsafe"}, 5, &output) == 126, @"script actions are refused for uninstall");
+
+    NSDictionary *system = UninstallPlanForRegistryStatus(@{@"kind": @"registry", @"id": @"git", @"state": @"system", @"path": @"/usr/bin/git"});
+    Assert([system[@"reason"] isEqualToString:@"Apple system tool"], @"system registry rows explain why they are locked");
+}
+
+static void TestOpenCommandResolution(void) {
+    CLIRegistryService *registry = [[CLIRegistryService alloc] initWithRegistryURL:[NSURL fileURLWithPath:@"Assets/CLIRegistry/registry.json"]
+                                                                     iconDirectory:@"Assets/CLIRegistry/icons"
+                                                                    cacheDirectory:[NSURL fileURLWithPath:NSTemporaryDirectory()]];
+    NSDictionary *claude = nil;
+    NSDictionary *git = nil;
+    for (NSDictionary *entry in registry.entries) {
+        if ([entry[@"id"] isEqualToString:@"claude"]) claude = entry;
+        if ([entry[@"id"] isEqualToString:@"git"]) git = entry;
+    }
+    Assert([claude[@"open"] isKindOfClass:[NSArray class]] && [claude[@"open"] count] == 0, @"claude's registry entry overrides launch arguments");
+    NSDictionary *claudeAction = OpenActionForCLI(claude, @"/usr/local/bin/claude", @"claude");
+    Assert([claudeAction[@"arguments"] isEqualToArray:@[]], @"claude launches with no arguments");
+    Assert([ShellCommandForUpdateAction(claudeAction) isEqualToString:@"/usr/local/bin/claude"], @"an agent launch command is just the binary");
+
+    NSDictionary *gitAction = OpenActionForCLI(git, @"/usr/bin/git", @"git");
+    Assert([gitAction[@"arguments"] isEqualToArray:@[@"--help"]], @"a plain CLI defaults to --help");
+    Assert([ShellCommandForUpdateAction(gitAction) isEqualToString:@"/usr/bin/git --help"], @"the default open command is <cli> --help");
+
+    NSDictionary *override = OpenActionForCLI(@{@"id": @"gh", @"bins": @[@"gh"], @"open": @[@"auth", @"status"]}, @"/opt/homebrew/bin/gh", @"gh");
+    Assert([override[@"arguments"] isEqualToArray:@[@"auth", @"status"]], @"registry open replaces the default");
+    NSDictionary *agentOverride = OpenActionForCLI(@{@"id": @"codex", @"open": @[@"--version"]}, @"/usr/local/bin/codex", @"codex");
+    Assert([agentOverride[@"arguments"] isEqualToArray:@[@"--version"]], @"an explicit open list wins over the agent default");
+
+    NSDictionary *generic = OpenActionForCLI(@{}, @"/Users/x/.local/bin/acme-agent", @"acme-agent");
+    Assert([generic[@"arguments"] isEqualToArray:@[]], @"unregistered agent-like CLIs just launch");
+    NSDictionary *tree = OpenActionForCLI(nil, @"tree", @"tree");
+    Assert([tree[@"arguments"] isEqualToArray:@[@"--help"]], @"an unregistered plain CLI defaults to --help");
+
+    NSDictionary *row = AnnotatedCLIRow(@{@"kind": @"cli", @"title": @"tree", @"item": @{@"name": @"tree", @"source": @"Homebrew"}}, @{});
+    Assert([row[@"openCommand"] isEqualToString:@"tree --help"], @"annotated rows carry the open command");
+    Assert([row[@"uninstallCommand"] isEqualToString:@"brew uninstall tree"], @"annotated rows carry the uninstall command");
+    Assert([row[@"selectionKey"] isEqualToString:@"item:Homebrew:tree"], @"annotated rows have a stable selection key");
+    NSDictionary *locked = AnnotatedCLIRow(@{@"kind": @"registry", @"id": @"git", @"title": @"Git", @"state": @"system", @"path": @"/usr/bin/git"}, @{@"id": @"git", @"bins": @[@"git"]});
+    Assert(locked[@"uninstallAction"] == nil && [locked[@"uninstallReason"] isEqualToString:@"Apple system tool"], @"system rows stay unselectable");
+    Assert([locked[@"openCommand"] isEqualToString:@"/usr/bin/git --help"], @"a system CLI can still be opened");
+}
+
+static void TestTerminalLaunchDoesNotBlock(void) {
+    dispatch_semaphore_t started = dispatch_semaphore_create(0);
+    dispatch_semaphore_t hold = dispatch_semaphore_create(0);
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    __block NSString *seenCommand = nil;
+    __block BOOL finished = NO;
+    TerminalLaunchHook = ^(NSString *command, NSString *terminal) {
+        seenCommand = command;
+        dispatch_semaphore_signal(started);
+        dispatch_semaphore_wait(hold, DISPATCH_TIME_FOREVER);
+        finished = YES;
+        dispatch_semaphore_signal(done);
+    };
+    NSDate *began = [NSDate date];
+    DispatchTerminalLaunch(@"tree --help", @"Ghostty");
+    Assert(-[began timeIntervalSinceNow] < 0.5, @"scheduling a terminal launch returns immediately");
+    Assert(dispatch_semaphore_wait(started, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC))) == 0, @"the launch runs off the caller");
+    Assert(!finished, @"the caller does not wait for the terminal");
+    Assert([seenCommand isEqualToString:@"tree --help"], @"the launch receives the open command");
+    dispatch_semaphore_signal(hold);
+    Assert(dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC))) == 0, @"the background launch should finish once released");
+    TerminalLaunchHook = nil;
+}
+
+@interface UninstallPanelSource : RowButtonPanelSource
+@property NSUInteger activations;
+@property NSUInteger uninstallRuns;
+@property NSArray *plans;
+@end
+
+@implementation UninstallPanelSource
+- (void)tickerPanel:(TickerPanelController *)panel activateRow:(NSDictionary *)row { self.activations++; }
+- (void)tickerPanel:(TickerPanelController *)panel runUninstallPlans:(NSArray<NSDictionary *> *)plans progress:(void (^)(NSUInteger, NSString *, NSString *))progress completion:(void (^)(void))completion {
+    self.uninstallRuns++;
+    self.plans = plans;
+    if (progress) progress(0, @"removed", @"removed");
+    if (completion) completion();
+}
+@end
+
+@interface TickerPanelController (UninstallTesting)
+- (void)handleRowClickAtIndex:(NSInteger)index shift:(BOOL)shift;
+- (void)uninstallFooterPressed;
+- (void)confirmUninstallPressed;
+- (void)cancelUninstallPressed;
+@end
+
+static void TestSelectModeConfirmsBeforeUninstall(void) {
+    [NSApplication sharedApplication];
+    UninstallPanelSource *source = [[UninstallPanelSource alloc] init];
+    source.rows = @[SelectableRow(@"a", @"tree"), @{@"kind": @"cli", @"title": @"git", @"selectionKey": @"b", @"uninstallReason": @"Apple system tool"}, SelectableRow(@"c", @"cowsay")];
+    TickerPanelController *panel = [[TickerPanelController alloc] init];
+    panel.delegate = source;
+    [panel renderContentBitmap];
+
+    [panel handleRowClickAtIndex:0 shift:NO];
+    Assert(source.activations == 1 && panel.selectedKeys.count == 0, @"a click outside select mode opens the row");
+
+    [panel setSelectMode:YES];
+    [panel handleRowClickAtIndex:0 shift:NO];
+    [panel handleRowClickAtIndex:1 shift:NO];
+    Assert(source.activations == 1, @"select mode does not open the CLI");
+    Assert([panel.selectedKeys.array isEqualToArray:@[@"a"]], @"select mode toggles only selectable rows");
+    [panel handleRowClickAtIndex:2 shift:YES];
+    Assert(panel.selectedKeys.count == 2 && [panel.selectedKeys containsObject:@"a"] && [panel.selectedKeys containsObject:@"c"], @"shift-click in the panel selects the range");
+
+    [panel uninstallFooterPressed];
+    Assert(panel.uninstallSheetVisible && source.uninstallRuns == 0, @"the footer opens the confirmation sheet and does not uninstall");
+    Assert(panel.uninstallSheetVisible, @"the sheet stays up until a choice is made");
+    [panel cancelUninstallPressed];
+    Assert(!panel.uninstallSheetVisible && source.uninstallRuns == 0, @"cancel leaves every CLI installed");
+
+    [panel uninstallFooterPressed];
+    [panel confirmUninstallPressed];
+    Assert(source.uninstallRuns == 1, @"Uninstall on the sheet is what starts the commands");
+    Assert(source.plans.count == 2, @"the sheet runs one plan per selected CLI");
+    Assert([source.plans[0][@"command"] isEqualToString:@"brew uninstall tree"], @"the confirmed plan carries the exact command");
+    Assert([source.plans[1][@"command"] isEqualToString:@"brew uninstall cowsay"], @"the second plan is cowsay");
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         TestHamburgerMenuIsInPanelAndKeyboardDriven();
@@ -412,6 +606,11 @@ int main(int argc, const char *argv[]) {
         TestSelfUpdateRunsThroughDetectedBinary();
         TestRegistryDumpWaitsForRefreshBeforeSettling();
         TestRowButtonResolvesRowFromItsView();
+        TestSelectionLogic();
+        TestUninstallPlans();
+        TestOpenCommandResolution();
+        TestTerminalLaunchDoesNotBlock();
+        TestSelectModeConfirmsBeforeUninstall();
         NSLog(@"All CLITicker tests passed.");
     }
     return 0;

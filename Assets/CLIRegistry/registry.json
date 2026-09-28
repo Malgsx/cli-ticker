@@ -1,5 +1,5 @@
 {
-  "about": "Well-known CLIs shown in the CLIs view. Fields: id, label, bins (first found on the login PATH wins), icon (Simple Icons slug; PNG in icons/), mark (monogram fallback), versionArgs (default [\"--version\"]), versionPattern (regex, first capture group), versionShell / versionSuffix / hideWhenVersion (shell-derived versions), brew / cask / npm (package names matched against the inventory scan, which decides outdated state and the update command), via + selfUpdate (tool's own updater as {executable, arguments}, run without a shell), check {command, outdatedWhenOutput | latestPattern}, github (owner/repo whose latest release is the upstream version). Regenerate icons with scripts/fetch_cli_icons.py.",
+  "about": "Well-known CLIs shown in the CLIs view. Fields: id, label, bins (first found on the login PATH wins), icon (Simple Icons slug; PNG in icons/), mark (monogram fallback), versionArgs (default [\"--version\"]), versionPattern (regex, first capture group), versionShell / versionSuffix / hideWhenVersion (shell-derived versions), brew / cask / npm (package names matched against the inventory scan, which decides outdated state and the update command), via + selfUpdate (tool's own updater as {executable, arguments}, run without a shell), check {command, outdatedWhenOutput | latestPattern}, github (owner/repo whose latest release is the upstream version), open (optional argv after the binary when the row is opened; interactive agents default to no arguments, every other CLI defaults to [\"--help\"]). Regenerate icons with scripts/fetch_cli_icons.py.",
   "clis": [
     {"id": "gh", "label": "GitHub CLI", "bins": ["gh"], "icon": "github", "brew": "gh", "github": "cli/cli"},
     {"id": "gh-extensions", "label": "gh extensions", "bins": ["gh"], "icon": "github", "via": "gh",
@@ -38,8 +38,8 @@
     {"id": "stripe", "label": "Stripe", "bins": ["stripe"], "icon": "stripe", "brew": ["stripe/stripe-cli/stripe", "stripe"], "github": "stripe/stripe-cli"},
     {"id": "cursor", "label": "Cursor", "bins": ["cursor"], "icon": "cursor", "cask": "cursor", "via": "app"},
     {"id": "cursor-agent", "label": "Cursor Agent", "bins": ["cursor-agent"], "icon": "cursor", "via": "self", "selfUpdate": {"executable": "cursor-agent", "arguments": ["update"]}},
-    {"id": "claude", "label": "Claude Code", "bins": ["claude"], "icon": "claude", "npm": "@anthropic-ai/claude-code", "cask": "claude-code", "via": "self", "selfUpdate": {"executable": "claude", "arguments": ["update"]}},
-    {"id": "codex", "label": "Codex", "bins": ["codex"], "mark": "CX", "npm": "@openai/codex", "cask": "codex", "brew": "codex", "github": "openai/codex"},
+    {"id": "claude", "label": "Claude Code", "bins": ["claude"], "icon": "claude", "npm": "@anthropic-ai/claude-code", "cask": "claude-code", "via": "self", "open": [], "selfUpdate": {"executable": "claude", "arguments": ["update"]}},
+    {"id": "codex", "label": "Codex", "bins": ["codex"], "mark": "CX", "npm": "@openai/codex", "cask": "codex", "brew": "codex", "open": [], "github": "openai/codex"},
     {"id": "gemini", "label": "Gemini CLI", "bins": ["gemini"], "icon": "googlegemini", "npm": "@google/gemini-cli", "brew": "gemini-cli"},
     {"id": "aider", "label": "Aider", "bins": ["aider"], "mark": "AI", "brew": "aider", "github": "Aider-AI/aider"},
     {"id": "amp", "label": "Amp", "bins": ["amp"], "mark": "A", "npm": "@sourcegraph/amp"},

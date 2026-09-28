@@ -29,7 +29,7 @@ All paths are relative to the repository root, so the clone can live anywhere.
 - `Sources/CLITickerObjC/main.m`: the app core. `InventoryService` scans package managers, and `MenuController` owns the menu, reports, and terminal launching.
 - `Sources/CLITickerObjC/TickerPanel.m`: the menu bar panel, including its in-panel ☰ menu and settings view (their items come from `panelMenuItems` / `panelSettings` in `main.m`). There is no native `NSMenu`; right-click on the menu bar icon opens the panel with the menu showing. `./cli build REPO=<you>/cli-ticker` points the app's own update check and About link at your fork.
 - `Sources/CLITickerObjC/CLIRegistry.m`: registry CLI detection, update checks, and updates with streamed progress.
-- `Assets/CLIRegistry/registry.json`: the data-driven list of known CLIs (binaries, version parsing, package names, update commands, GitHub release repos). Add an entry to support a new CLI. `Assets/CLIRegistry/icons/` holds [Simple Icons](https://simpleicons.org) templates, which you can regenerate with `scripts/fetch_cli_icons.py`.
+- `Assets/CLIRegistry/registry.json`: the data-driven list of known CLIs (binaries, version parsing, package names, update commands, GitHub release repos). Add an entry to support a new CLI. Optional `open` is the argument list appended when that row is opened in the preferred terminal. Leave it off and an interactive agent launches with no arguments, while every other CLI runs with `--help`. `"open": []` forces a bare launch; `"open": ["auth", "status"]` runs those arguments instead. `Assets/CLIRegistry/icons/` holds [Simple Icons](https://simpleicons.org) templates, which you can regenerate with `scripts/fetch_cli_icons.py`.
 - `Assets/Logos/`: PNG logos for agent tools.
 - `Assets/AppIcon/`: app icon and menu bar template image. Edit `scripts/generate_icon_assets.py`, then run `./cli icons` (needs Pillow).
 - `install.sh`: the one-line installer. `.github/workflows/`: CI (build, tests, and README install tests) and releases on `v*` tags.
@@ -89,6 +89,12 @@ curl -fsSL https://raw.githubusercontent.com/<you>/cli-ticker/main/install.sh | 
 You can also change the `REPO` default in `install.sh`. `CLI_TICKER_INSTALL_DIR` changes the install folder (default `~/Applications`), and `CLI_TICKER_NO_LAUNCH=1` skips opening the app.
 
 If a downloaded build is ever blocked by Gatekeeper, run `xattr -dr com.apple.quarantine ~/Applications/CLITicker.app`, or right-click the app, choose **Open**, then click **Open** in the dialog.
+
+## Opening a CLI and uninstalling
+
+A row click or Return runs that CLI in the preferred terminal. The command is argv, then quoted for the terminal the same way update commands are. Agents launch with no extra arguments. Other CLIs run with `--help` unless `open` in `registry.json` says otherwise. The `↑ update` button stays a separate control.
+
+Select mode (toolbar or the ☰ item) checks rows that have a safe uninstall for their install source. The confirmation sheet lists each command and is the only way the panel starts an uninstall. `./cli test` covers the uninstall builder, selection, and open-command resolution. The uninstall CI job installs `tree` and `cowsay`, then runs `build/CLITicker.app/Contents/MacOS/CLITicker --exercise-uninstall <dir> tree cowsay` after `./cli build`.
 
 ## How scanning works
 
