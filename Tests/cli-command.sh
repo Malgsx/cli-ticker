@@ -98,12 +98,16 @@ git -C "$pull_tmp" clone -b main origin clone >/dev/null
 printf 'pulled\n' >> "$pull_tmp/seed/README"
 git -C "$pull_tmp/seed" add README
 git -C "$pull_tmp/seed" commit -m pulled >/dev/null
-git -C "$pull_tmp/seed" push origin main >/dev/null
-# macOS bash 3.2 can leave a failing assignment in place under set -e, and a
-# negated successful command can abort before the error text is printed.
-# Capture the status explicitly and match the clone path with a glob so a
-# /var -> /private/var canonicalization still counts.
+# Keep going after a non-zero status so the failure text is what CI shows.
+# Git 2.55 on macOS has exited 1 from this push after a fast-forward that
+# did land, which used to abort the script before the update assertions.
 set +e
+git -C "$pull_tmp/seed" push origin main >"$pull_tmp/push.out" 2>&1
+push_status=$?
+if [[ "$push_status" -ne 0 ]]; then
+  echo "git push exited $push_status" >&2
+  cat "$pull_tmp/push.out" >&2
+fi
 out="$(cd "$pull_tmp/clone" && CLI_TICKER_REINSTALL_CMD=true "$cli" update 2>&1)"
 status=$?
 set -e
