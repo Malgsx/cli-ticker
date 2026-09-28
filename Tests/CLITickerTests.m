@@ -30,6 +30,45 @@ static void TestCommandTimeout(void) {
     Assert(-[started timeIntervalSinceNow] < 3, @"timeout should return promptly");
 }
 
+static BOOL ProcessExists(pid_t pid) {
+    return kill(pid, 0) == 0 || errno == EPERM;
+}
+
+static BOOL WaitForProcessExit(pid_t pid, NSTimeInterval limit) {
+    NSDate *giveUp = [NSDate dateWithTimeIntervalSinceNow:limit];
+    while (ProcessExists(pid) && giveUp.timeIntervalSinceNow > 0) usleep(20000);
+    return !ProcessExists(pid);
+}
+
+static void TestCommandTimeoutKillsDescendants(void) {
+    NSDate *started = [NSDate date];
+    CommandResult *result = RunCommandWithTimeout(@"/bin/sh", @[@"-c", @"sleep 30 & echo $!; wait"], 0.5);
+    Assert(result.timedOut, @"command waiting on a background child should time out");
+    Assert(-[started timeIntervalSinceNow] < 4, @"timeout should return promptly despite a background child");
+    pid_t child = (pid_t)result.standardOutput.intValue;
+    Assert(child > 0, @"background child pid should be captured before the timeout");
+    BOOL gone = WaitForProcessExit(child, 2);
+    if (!gone) kill(child, SIGKILL);
+    Assert(gone, @"timeout should kill the command's whole process group");
+}
+
+static void TestCommandReturnsWhenBackgroundChildHoldsOutput(void) {
+    NSDate *started = [NSDate date];
+    CommandResult *result = RunCommandWithTimeout(@"/bin/sh", @[@"-c", @"sleep 30 & echo $!"], 10);
+    pid_t child = (pid_t)result.standardOutput.intValue;
+    if (child > 0) kill(child, SIGKILL);
+    Assert(!result.timedOut, @"exited command should not time out");
+    Assert(result.terminationStatus == 0, @"exited command should report its status");
+    Assert(child > 0, @"output written before exit should be captured");
+    Assert(-[started timeIntervalSinceNow] < 4, @"an inherited pipe must not block return after the command exits");
+}
+
+static void TestCommandReportsLaunchError(void) {
+    CommandResult *result = RunCommandWithTimeout(@"/nonexistent/cli-ticker-test", @[], 5);
+    Assert(result.launchError.length > 0, @"missing executable should report a launch error");
+    Assert(!result.timedOut, @"launch failure should not time out");
+}
+
 static void TestUpdateArgumentsAreShellSafe(void) {
     NSString *sentinel = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
     NSString *name = [NSString stringWithFormat:@"tool name'; touch '%@'; #", sentinel];
@@ -53,6 +92,9 @@ int main(int argc, const char *argv[]) {
         TestCommandCapturesBothStreams();
         TestCommandReportsFailure();
         TestCommandTimeout();
+        TestCommandTimeoutKillsDescendants();
+        TestCommandReturnsWhenBackgroundChildHoldsOutput();
+        TestCommandReportsLaunchError();
         TestUpdateArgumentsAreShellSafe();
         NSLog(@"All CLITicker tests passed.");
     }

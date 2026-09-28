@@ -1,6 +1,13 @@
 #import <AppKit/AppKit.h>
 #import <CoreServices/CoreServices.h>
+#import <errno.h>
+#import <fcntl.h>
+#import <poll.h>
 #import <signal.h>
+#import <spawn.h>
+#import <string.h>
+#import <sys/wait.h>
+#import <unistd.h>
 
 static NSString *const StatusCurrent = @"current";
 static NSString *const StatusOutdated = @"outdated";
@@ -24,83 +31,194 @@ static const NSUInteger RecentChangeCapacity = 20;
 @implementation CommandResult
 @end
 
+// After a timeout, how long the process group gets to exit on SIGTERM before SIGKILL.
+static const NSTimeInterval CommandTerminateGracePeriod = 2;
+// After the command exits, how long to keep reading while a background
+// descendant still holds its stdout or stderr open.
+static const NSTimeInterval CommandOutputDrainPeriod = 1;
+
+static NSTimeInterval MonotonicNow(void) {
+    return [NSProcessInfo processInfo].systemUptime;
+}
+
+static char **CStringArray(NSArray<NSString *> *strings) {
+    char **array = calloc(strings.count + 1, sizeof(char *));
+    for (NSUInteger i = 0; i < strings.count; i++) {
+        array[i] = strdup(strings[i].UTF8String ?: "");
+    }
+    return array;
+}
+
+static void FreeCStringArray(char **array) {
+    for (char **entry = array; *entry; entry++) free(*entry);
+    free(array);
+}
+
+static BOOL ReapChild(pid_t pid, int *status) {
+    pid_t reaped;
+    do {
+        reaped = waitpid(pid, status, WNOHANG);
+    } while (reaped == -1 && errno == EINTR);
+    return reaped == pid || (reaped == -1 && errno == ECHILD);
+}
+
+// Reads everything currently available from a non-blocking descriptor and
+// closes it at EOF or on error.
+static void DrainDescriptor(int *fd, NSMutableData *data) {
+    if (*fd < 0) return;
+    uint8_t buffer[16384];
+    while (YES) {
+        ssize_t count = read(*fd, buffer, sizeof(buffer));
+        if (count > 0) {
+            [data appendBytes:buffer length:(NSUInteger)count];
+            continue;
+        }
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0 && errno == EAGAIN) return;
+        close(*fd);
+        *fd = -1;
+        return;
+    }
+}
+
 static CommandResult *RunCommandWithTimeout(NSString *launchPath, NSArray<NSString *> *arguments, NSTimeInterval timeout) {
     CommandResult *result = [[CommandResult alloc] init];
     result.standardOutput = @"";
     result.standardError = @"";
     result.terminationStatus = -1;
+    if (launchPath.length == 0) {
+        result.launchError = @"No executable path";
+        return result;
+    }
 
-    NSTask *task = [[NSTask alloc] init];
-    task.launchPath = launchPath;
-    task.arguments = arguments;
     NSMutableDictionary *environment = [[[NSProcessInfo processInfo] environment] mutableCopy];
     environment[@"HOMEBREW_NO_AUTO_UPDATE"] = @"1";
     environment[@"HOMEBREW_NO_ANALYTICS"] = @"1";
     environment[@"HOMEBREW_NO_INSTALL_CLEANUP"] = @"1";
-    task.environment = environment;
+    NSMutableArray<NSString *> *environmentStrings = [NSMutableArray array];
+    [environment enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *value, __unused BOOL *stop) {
+        [environmentStrings addObject:[NSString stringWithFormat:@"%@=%@", key, value]];
+    }];
+    NSMutableArray<NSString *> *argumentStrings = [NSMutableArray arrayWithObject:launchPath];
+    [argumentStrings addObjectsFromArray:arguments ?: @[]];
 
-    NSPipe *stdoutPipe = [NSPipe pipe];
-    NSPipe *stderrPipe = [NSPipe pipe];
-    task.standardOutput = stdoutPipe;
-    task.standardError = stderrPipe;
-
-    dispatch_group_t readers = dispatch_group_create();
-    dispatch_queue_t readerQueue = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
-    __block NSData *stdoutData;
-    __block NSData *stderrData;
-    dispatch_group_async(readers, readerQueue, ^{
-        @try {
-            stdoutData = [[stdoutPipe fileHandleForReading] readDataToEndOfFile];
-        } @catch (__unused NSException *exception) {
-            stdoutData = [NSData data];
-        }
-    });
-    dispatch_group_async(readers, readerQueue, ^{
-        @try {
-            stderrData = [[stderrPipe fileHandleForReading] readDataToEndOfFile];
-        } @catch (__unused NSException *exception) {
-            stderrData = [NSData data];
-        }
-    });
-
-    dispatch_semaphore_t terminated = dispatch_semaphore_create(0);
-    task.terminationHandler = ^(__unused NSTask *finishedTask) {
-        dispatch_semaphore_signal(terminated);
-    };
-
-    @try {
-        [task launch];
-    } @catch (NSException *exception) {
-        result.launchError = exception.reason ?: @"Unable to launch command";
-        [[stdoutPipe fileHandleForWriting] closeFile];
-        [[stderrPipe fileHandleForWriting] closeFile];
-        dispatch_group_wait(readers, DISPATCH_TIME_FOREVER);
+    int stdoutPipe[2];
+    int stderrPipe[2];
+    if (pipe(stdoutPipe) != 0) {
+        result.launchError = @(strerror(errno));
+        return result;
+    }
+    if (pipe(stderrPipe) != 0) {
+        result.launchError = @(strerror(errno));
+        close(stdoutPipe[0]);
+        close(stdoutPipe[1]);
         return result;
     }
 
-    // NSTask duplicates these descriptors for the child. Closing the parent's
-    // copies lets both readers observe EOF as soon as the child exits.
-    [[stdoutPipe fileHandleForWriting] closeFile];
-    [[stderrPipe fileHandleForWriting] closeFile];
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_adddup2(&actions, stdoutPipe[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, stderrPipe[1], STDERR_FILENO);
 
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC));
-    if (dispatch_semaphore_wait(terminated, deadline) != 0) {
-        result.timedOut = YES;
-        [task terminate];
-        if (dispatch_semaphore_wait(terminated, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) != 0 && task.isRunning) {
-            kill(task.processIdentifier, SIGKILL);
-            dispatch_semaphore_wait(terminated, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
-        }
-        // A descendant may still hold an inherited pipe open. Do not let that
-        // defeat the timeout guarantee while waiting for EOF.
-        [[stdoutPipe fileHandleForReading] closeFile];
-        [[stderrPipe fileHandleForReading] closeFile];
+    // The child leads its own process group so a timeout can signal every
+    // descendant, and inherits only stdin/stdout/stderr so pipes from
+    // concurrent commands cannot leak into it and delay their EOF.
+    posix_spawnattr_t attributes;
+    posix_spawnattr_init(&attributes);
+    posix_spawnattr_setflags(&attributes, (short)(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT));
+    posix_spawnattr_setpgroup(&attributes, 0);
+    sigset_t signals;
+    sigemptyset(&signals);
+    posix_spawnattr_setsigmask(&attributes, &signals);
+    sigaddset(&signals, SIGPIPE);
+    sigaddset(&signals, SIGHUP);
+    sigaddset(&signals, SIGINT);
+    sigaddset(&signals, SIGQUIT);
+    sigaddset(&signals, SIGTERM);
+    posix_spawnattr_setsigdefault(&attributes, &signals);
+
+    char **argv = CStringArray(argumentStrings);
+    char **envp = CStringArray(environmentStrings);
+    pid_t pid = 0;
+    int spawnError = posix_spawn(&pid, launchPath.fileSystemRepresentation, &actions, &attributes, argv, envp);
+    FreeCStringArray(argv);
+    FreeCStringArray(envp);
+    posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attributes);
+    close(stdoutPipe[1]);
+    close(stderrPipe[1]);
+
+    if (spawnError != 0) {
+        result.launchError = @(strerror(spawnError));
+        close(stdoutPipe[0]);
+        close(stderrPipe[0]);
+        return result;
     }
 
-    dispatch_group_wait(readers, DISPATCH_TIME_FOREVER);
-    result.standardOutput = [[NSString alloc] initWithData:stdoutData ?: [NSData data] encoding:NSUTF8StringEncoding] ?: @"";
-    result.standardError = [[NSString alloc] initWithData:stderrData ?: [NSData data] encoding:NSUTF8StringEncoding] ?: @"";
-    if (!task.isRunning) result.terminationStatus = task.terminationStatus;
+    int fds[2] = {stdoutPipe[0], stderrPipe[0]};
+    NSMutableData *outputs[2] = {[NSMutableData data], [NSMutableData data]};
+    for (int i = 0; i < 2; i++) {
+        int flags = fcntl(fds[i], F_GETFL);
+        if (flags != -1) fcntl(fds[i], F_SETFL, flags | O_NONBLOCK);
+    }
+
+    NSTimeInterval deadline = MonotonicNow() + timeout;
+    NSTimeInterval exitedAt = 0;
+    int status = 0;
+    BOOL exited = NO;
+    while (YES) {
+        if (!exited && ReapChild(pid, &status)) {
+            exited = YES;
+            exitedAt = MonotonicNow();
+        }
+        NSTimeInterval now = MonotonicNow();
+        if (exited && ((fds[0] < 0 && fds[1] < 0) || now - exitedAt >= CommandOutputDrainPeriod)) break;
+        if (!exited && now >= deadline) {
+            result.timedOut = YES;
+            break;
+        }
+
+        struct pollfd pollfds[2];
+        nfds_t pollCount = 0;
+        for (int i = 0; i < 2; i++) {
+            if (fds[i] < 0) continue;
+            pollfds[pollCount].fd = fds[i];
+            pollfds[pollCount].events = POLLIN;
+            pollfds[pollCount].revents = 0;
+            pollCount++;
+        }
+        if (poll(pollfds, pollCount, 20) > 0) {
+            for (int i = 0; i < 2; i++) DrainDescriptor(&fds[i], outputs[i]);
+        }
+    }
+
+    if (result.timedOut) {
+        kill(-pid, SIGTERM);
+        NSTimeInterval killAt = MonotonicNow() + CommandTerminateGracePeriod;
+        while (!(exited = ReapChild(pid, &status)) && MonotonicNow() < killAt) {
+            for (int i = 0; i < 2; i++) DrainDescriptor(&fds[i], outputs[i]);
+            usleep(20000);
+        }
+        // The group ID cannot be reused while any member is alive, so this
+        // only reaches descendants that outlived or ignored SIGTERM.
+        kill(-pid, SIGKILL);
+        if (!exited) {
+            while (waitpid(pid, &status, 0) == -1 && errno == EINTR) {}
+        }
+    }
+
+    for (int i = 0; i < 2; i++) {
+        DrainDescriptor(&fds[i], outputs[i]);
+        if (fds[i] >= 0) close(fds[i]);
+    }
+    result.standardOutput = [[NSString alloc] initWithData:outputs[0] encoding:NSUTF8StringEncoding] ?: @"";
+    result.standardError = [[NSString alloc] initWithData:outputs[1] encoding:NSUTF8StringEncoding] ?: @"";
+    if (WIFEXITED(status)) {
+        result.terminationStatus = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        result.terminationStatus = WTERMSIG(status);
+    }
     return result;
 }
 
