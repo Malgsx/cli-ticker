@@ -30,7 +30,7 @@
 - (void)tickerPanel:(TickerPanelController *)panel selectTerminal:(NSString *)terminal;
 @optional
 - (void)tickerPanel:(TickerPanelController *)panel changeSetting:(NSString *)settingId toOption:(NSString *)option;
-// Invoked only after the in-panel update sheet's Update control is used. commands is the full
+// Invoked only after the detached update window's Update control is used. commands is the full
 // list, not the page on screen.
 - (void)tickerPanel:(TickerPanelController *)panel confirmUpdateCommands:(NSArray<NSString *> *)commands;
 // Invoked only after the in-panel confirmation sheet's Uninstall control is used.
@@ -72,6 +72,11 @@ NSImage *TickerMonogramIcon(NSString *mark);
 @property (readonly, getter=isSelecting) BOOL selecting;
 @property (readonly, getter=isUninstallSheetVisible) BOOL uninstallSheetVisible;
 @property (readonly, getter=isUpdateSheetVisible) BOOL updateSheetVisible;
+// The Update all / multi-select confirmation, once it has been opened. A separate movable
+// window, not the status panel.
+@property (readonly) NSWindow *updateWindow;
+// YES while that confirmation is showing in updateWindow, detached from the status panel.
+@property (readonly, getter=isUpdateConfirmationDetached) BOOL updateConfirmationDetached;
 @property (readonly) NSUInteger updatePage;
 @property (readonly) NSUInteger updatePageCount;
 @property (readonly, copy) NSOrderedSet<NSString *> *selectedKeys;
@@ -88,9 +93,10 @@ NSImage *TickerMonogramIcon(NSString *mark);
 - (void)setPreviewSelectionKeys:(NSArray<NSString *> *)keys;
 // Shows the confirmation sheet. Nothing is uninstalled until Uninstall is pressed.
 - (void)presentUninstallConfirmation:(NSArray<NSDictionary *> *)plans;
-// In-panel confirmation for Update all and a multi-select update. Ten commands sit in a
-// horizontal box; further commands are another page. An empty list shows the explanation
-// with no Update control.
+// Confirmation for Update all and a multi-select update. Opens immediately as its own
+// movable window so the menu-bar panel can resign without dismissing it. Ten commands sit
+// in a horizontal box; further commands are another page. An empty list shows the explanation
+// with no Update control. Closing the window cancels.
 - (void)presentUpdateConfirmationWithTitle:(NSString *)title detail:(NSString *)detail commands:(NSArray<NSString *> *)commands;
 - (void)dismissUpdateConfirmation;
 - (NSArray<NSString *> *)visibleUpdateCommands;
@@ -104,4 +110,6 @@ NSImage *TickerMonogramIcon(NSString *mark);
 
 // Renders the panel content (without the window chrome) into a bitmap, for previews.
 - (NSBitmapImageRep *)renderContentBitmap;
+// Renders the detached update confirmation card, for previews.
+- (NSBitmapImageRep *)renderUpdateConfirmationBitmap;
 @end

@@ -169,7 +169,7 @@ BOOL WritePanelPreviewPNG(NSBitmapImageRep *panelBitmap, NSString *path, BOOL wi
     const CGFloat scale = 2;
     const CGFloat margin = 36;
     const CGFloat menuBarHeight = withMenuBar ? 26 : 0;
-    NSSize panelSize = TickerPanelSize;
+    NSSize panelSize = panelBitmap.size.width > 1 ? panelBitmap.size : TickerPanelSize;
     NSSize canvas = NSMakeSize(panelSize.width + margin * 2, panelSize.height + margin * 2 + menuBarHeight);
 
     NSBitmapImageRep *output = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL
@@ -275,7 +275,7 @@ BOOL RenderPanelPreviewsIfRequested(void) {
         nil];
     for (NSUInteger i = updateCommands.count; i < 88; i++) [updateCommands addObject:[NSString stringWithFormat:@"brew upgrade pkg-%lu", (unsigned long)i]];
     [panel presentUpdateConfirmationWithTitle:@"Update 88 tools?" detail:@"Opens Ghostty" commands:updateCommands];
-    BOOL updateOK = WritePanelPreviewPNG([panel renderContentBitmap], [directory stringByAppendingPathComponent:@"update-confirm.png"], YES);
+    BOOL updateOK = WritePanelPreviewPNG([panel renderUpdateConfirmationBitmap], [directory stringByAppendingPathComponent:@"update-confirm.png"], NO);
     [panel dismissUpdateConfirmation];
     [panel setSelectMode:YES];
     [panel setPreviewSelectionKeys:@[@"registry:gh", @"registry:aws"]];

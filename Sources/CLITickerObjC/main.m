@@ -2042,7 +2042,7 @@ static void DispatchGroupUpdate(NSArray<NSString *> *commands, NSString *script,
     return count;
 }
 
-// The download button and Update all open this inside the panel. Ten commands per page.
+// The download button and Update all open this in a detached window. Ten commands per page.
 - (void)presentSupportedUpdates {
     NSArray<NSString *> *commands = [self allUpdateCommands];
     if (commands.count == 0) {

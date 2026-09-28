@@ -645,7 +645,23 @@ static void TestSelectModeConfirmsBeforeUninstall(void) {
 @interface TickerPanelController (UpdateTesting)
 - (void)confirmUpdatePressed;
 - (void)cancelUpdatePressed;
+- (void)windowDidResignKey:(NSNotification *)notification;
 @end
+
+static void AssertUpdateConfirmationDetached(TickerPanelController *panel) {
+    Assert(panel.updateConfirmationDetached, @"opening the confirmation detaches it from the status panel");
+    NSWindow *updateWindow = panel.updateWindow;
+    Assert(updateWindow != nil && updateWindow != panel.panel, @"the confirmation is its own window");
+    NSView *sheet = [panel valueForKey:@"updateSheet"];
+    Assert(sheet.window == updateWindow, @"the card is hosted by the detached window");
+    Assert((updateWindow.styleMask & NSWindowStyleMaskTitled) != 0, @"a title bar lets the window be dragged");
+    Assert((updateWindow.styleMask & NSWindowStyleMaskClosable) != 0, @"the window has a close button");
+    Assert(updateWindow.movable, @"the detached window can be moved");
+    Assert(updateWindow.level == NSFloatingWindowLevel, @"the confirmation floats on its own");
+    Assert(updateWindow.level != panel.panel.level, @"it is not glued to the status-item window level");
+    Assert(panel.panel.childWindows == nil || ![panel.panel.childWindows containsObject:updateWindow], @"it is not a child of the status panel");
+    Assert(NSWidth(sheet.frame) >= TickerPanelSize.width - 1, @"the window is wide enough for the ten-per-page grid");
+}
 
 static void TestUpdateConfirmationPaginatesTenPerPage(void) {
     [NSApplication sharedApplication];
@@ -658,7 +674,8 @@ static void TestUpdateConfirmationPaginatesTenPerPage(void) {
     NSMutableArray<NSString *> *commands = [NSMutableArray array];
     for (NSUInteger i = 0; i < 25; i++) [commands addObject:[NSString stringWithFormat:@"brew upgrade pkg-%lu", (unsigned long)i]];
     [panel presentUpdateConfirmationWithTitle:@"Update 25 tools?" detail:@"Opens Ghostty and runs these" commands:commands];
-    Assert(panel.updateSheetVisible, @"Update all opens the in-panel sheet");
+    Assert(panel.updateSheetVisible, @"Update all opens the confirmation");
+    AssertUpdateConfirmationDetached(panel);
     Assert(TickerUpdatePageSize == 10, @"a page holds 10 commands");
     Assert(panel.updatePage == 1 && panel.updatePageCount == 3, @"25 commands fill three pages");
     Assert(panel.visibleUpdateCommands.count == 10, @"the first page shows 10 commands");
@@ -669,8 +686,7 @@ static void TestUpdateConfirmationPaginatesTenPerPage(void) {
     Assert(exitButton.action == @selector(cancelUpdatePressed) && exitButton.target == panel, @"Exit closes the card");
     Assert(NSMaxY(exitButton.frame) < 36 && NSMinX(exitButton.frame) > NSWidth(sheet.frame) * 0.7, @"Exit sits in the top-right of the card");
     Assert(NSWidth(sheet.frame) > NSHeight(sheet.frame), @"the confirmation is a wide box");
-    NSRect sheetInPanel = [sheet convertRect:sheet.bounds toView:panel.panel.contentView];
-    Assert(NSContainsRect(panel.panel.contentView.bounds, sheetInPanel), @"the box stays inside the panel");
+    Assert(sheet.window != panel.panel, @"the card is not trapped in the status panel");
 
     NSArray<NSString *> *pageOne = [panel.visibleUpdateCommands copy];
     Assert(pageOne.count == 10, @"page 1 is ten commands");
@@ -730,6 +746,20 @@ static void TestUpdateConfirmationPaginatesTenPerPage(void) {
     exitButton = [[panel valueForKey:@"updateSheet"] valueForKey:@"exitButton"];
     Assert([exitButton sendAction:exitButton.action to:exitButton.target], @"Exit sends its action");
     Assert(!panel.updateSheetVisible && source.confirmed == nil, @"Exit closes the sheet without updating");
+
+    [panel presentUpdateConfirmationWithTitle:@"Update 25 tools?" detail:@"Opens Ghostty and runs these" commands:commands];
+    AssertUpdateConfirmationDetached(panel);
+    NSWindow *updateWindow = panel.updateWindow;
+    [panel.panel orderFrontRegardless];
+    if (panel.panel.isVisible) {
+        [panel windowDidResignKey:[NSNotification notificationWithName:NSWindowDidResignKeyNotification object:panel.panel]];
+        Assert(!panel.isVisible, @"resigning key closes the status panel");
+    }
+    Assert(panel.updateSheetVisible && updateWindow.isVisible && source.confirmed == nil, @"the status panel resigning does not dismiss the confirmation");
+    [panel close];
+    Assert(panel.updateSheetVisible && updateWindow.isVisible && source.confirmed == nil, @"closing the status panel does not cancel the confirmation");
+    [updateWindow close];
+    Assert(!panel.updateSheetVisible && source.confirmed == nil, @"closing the detached window cancels");
 
     NSMutableArray<NSString *> *four = [NSMutableArray array];
     for (NSUInteger i = 0; i < 4; i++) [four addObject:[NSString stringWithFormat:@"brew upgrade few-%lu", (unsigned long)i]];
@@ -802,7 +832,8 @@ static void TestGroupUpdateDoesNotBlock(void) {
     Assert(update != nil && !update.hidden, @"two selected updates show an Update control");
     Assert([update.title isEqualToString:@"Update 2"], @"the control counts the selected update commands");
     Assert([update sendAction:update.action to:update.target], @"Update opens the confirmation");
-    Assert(panel.updateSheetVisible && panel.updatePageCount == 1, @"the selection confirms in the in-panel sheet");
+    Assert(panel.updateSheetVisible && panel.updatePageCount == 1, @"the selection confirms in the detached window");
+    AssertUpdateConfirmationDetached(panel);
     Assert([panel.visibleUpdateCommands isEqualToArray:@[@"brew upgrade a", @"npm install -g c"]], @"the sheet lists only the selected commands");
     NSButton *pager = [[panel valueForKey:@"updateSheet"] valueForKey:@"previousButton"];
     Assert(pager.hidden, @"two commands do not paginate");
@@ -811,7 +842,7 @@ static void TestGroupUpdateDoesNotBlock(void) {
     NSDate *began = [NSDate date];
     PressKey(panel, @selector(insertNewline:));
     Assert(-[began timeIntervalSinceNow] < 0.5, @"confirming a multi-select update returns immediately");
-    Assert(!panel.updateSheetVisible, @"confirm closes the sheet");
+    Assert(!panel.updateSheetVisible && !panel.updateWindow.isVisible, @"confirm closes the detached window");
     Assert(source.confirmed.count == 2, @"confirm hands back every selected command");
     Assert(dispatch_semaphore_wait(started, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC))) == 0, @"the group update runs off the caller");
     Assert(!finished, @"the caller does not wait for the terminal");

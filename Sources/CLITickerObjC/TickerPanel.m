@@ -204,6 +204,28 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 }
 @end
 
+// Update confirmation lives here so it can be dragged and can stay up after the status panel resigns.
+@interface TickerUpdateWindow : NSWindow
+@property (copy) void (^cancelHandler)(void);
+@property (copy) void (^commandHandler)(SEL command);
+@end
+
+@implementation TickerUpdateWindow
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return NO; }
+- (void)cancelOperation:(id)sender {
+    if (self.cancelHandler) self.cancelHandler();
+}
+- (void)keyDown:(NSEvent *)event {
+    [self interpretKeyEvents:@[event]];
+}
+- (void)moveLeft:(id)sender { if (self.commandHandler) self.commandHandler(@selector(moveLeft:)); }
+- (void)moveRight:(id)sender { if (self.commandHandler) self.commandHandler(@selector(moveRight:)); }
+- (void)moveUp:(id)sender { if (self.commandHandler) self.commandHandler(@selector(moveUp:)); }
+- (void)moveDown:(id)sender { if (self.commandHandler) self.commandHandler(@selector(moveDown:)); }
+- (void)insertNewline:(id)sender { if (self.commandHandler) self.commandHandler(@selector(insertNewline:)); }
+@end
+
 // Sidebar row: label on the left, count right-aligned, subtle highlight when selected.
 @interface TickerSidebarRow : NSView
 @property (weak) id target;
@@ -789,8 +811,8 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 }
 @end
 
-// Update confirmation: a short dark card. Ten commands fill a horizontal box (five across,
-// two rows), then the next page. The pager sits under that box.
+// Update confirmation: a short dark card in its own window. Ten commands fill a horizontal
+// box (five across, two rows), then the next page. The pager sits under that box.
 static const NSUInteger UpdatePageColumns = 5;
 static const CGFloat UpdateCellHeight = 20;
 static const CGFloat UpdateCellGap = 6;
@@ -812,6 +834,7 @@ static NSString *TickerTruncatedString(NSString *text, NSDictionary *attributes,
 @property (copy) NSString *detailText;
 @property (copy) NSArray<NSString *> *commands;
 @property NSInteger page;
+@property BOOL layingOut;
 @property TickerChipButton *previousButton;
 @property TickerChipButton *nextButton;
 @property TickerChipButton *exitButton;
@@ -823,6 +846,7 @@ static NSString *TickerTruncatedString(NSString *text, NSDictionary *attributes,
 - (NSRect)frameForVisibleCommandAtIndex:(NSUInteger)index;
 - (void)stepPage:(NSInteger)delta;
 - (void)relayout;
+- (NSSize)preferredContentSize;
 @end
 
 @implementation TickerUpdateSheet
@@ -845,6 +869,7 @@ static NSString *TickerTruncatedString(NSString *text, NSDictionary *attributes,
     self.cancelButton.title = @"Cancel";
     self.confirmButton.title = @"Update";
     for (NSButton *button in @[self.previousButton, self.nextButton, self.exitButton, self.cancelButton, self.confirmButton]) {
+        button.refusesFirstResponder = YES;
         [self addSubview:button];
     }
     return self;
@@ -875,11 +900,24 @@ static NSString *TickerTruncatedString(NSString *text, NSDictionary *attributes,
     return (count + UpdatePageColumns - 1) / UpdatePageColumns;
 }
 
+- (CGFloat)layoutWidth {
+    CGFloat width = NSWidth(self.bounds);
+    if (width > 24) return width;
+    return [self preferredContentSize].width;
+}
+
+- (NSSize)preferredContentSize {
+    NSUInteger rows = [self visibleRowCount];
+    CGFloat boxHeight = rows == 0 ? 22 : (UpdateBoxPad * 2 + rows * UpdateCellHeight + (rows - 1) * UpdateCellGap);
+    return NSMakeSize(TickerPanelSize.width, 46 + boxHeight + 36);
+}
+
 - (NSRect)commandBoxRect {
     NSUInteger rows = [self visibleRowCount];
-    if (rows == 0 || NSWidth(self.bounds) <= 24) return NSZeroRect;
+    CGFloat width = [self layoutWidth];
+    if (rows == 0 || width <= 24) return NSZeroRect;
     CGFloat boxHeight = UpdateBoxPad * 2 + rows * UpdateCellHeight + (rows - 1) * UpdateCellGap;
-    return NSMakeRect(12, 46, NSWidth(self.bounds) - 24, boxHeight);
+    return NSMakeRect(12, 46, width - 24, boxHeight);
 }
 
 - (NSRect)frameForVisibleCommandAtIndex:(NSUInteger)index {
@@ -905,13 +943,20 @@ static NSString *TickerTruncatedString(NSString *text, NSDictionary *attributes,
 }
 
 - (void)relayout {
-    NSUInteger rows = self.commands.count == 0 ? 0 : [self visibleRowCount];
-    CGFloat boxHeight = rows == 0 ? 22 : (UpdateBoxPad * 2 + rows * UpdateCellHeight + (rows - 1) * UpdateCellGap);
-    CGFloat width = TickerPanelSize.width - 28;
-    CGFloat height = 46 + boxHeight + 36;
-    CGFloat available = TickerPanelSize.height - ToolbarHeight - FooterHeight;
-    CGFloat y = ToolbarHeight + MAX(8, floor((available - height) / 2.0));
-    self.frame = NSMakeRect(14, y, width, height);
+    if (self.layingOut) return;
+    self.layingOut = YES;
+    NSSize size = [self preferredContentSize];
+    if (self.window) {
+        NSSize content = [self.window contentRectForFrameRect:self.window.frame].size;
+        if (fabs(content.width - size.width) > 0.5 || fabs(content.height - size.height) > 0.5) {
+            [self.window setContentSize:size];
+        }
+    }
+    NSSize fitted = self.superview ? self.superview.bounds.size : size;
+    if (fitted.width < 32 || fitted.height < 32) fitted = size;
+    self.frame = NSMakeRect(0, 0, fitted.width, fitted.height);
+    CGFloat width = fitted.width;
+    CGFloat height = fitted.height;
 
     CGFloat pagerY = height - 28;
     BOOL multiPage = self.pageCount > 1;
@@ -928,6 +973,7 @@ static NSString *TickerTruncatedString(NSString *text, NSDictionary *attributes,
     self.nextButton.enabled = self.page + 1 < (NSInteger)self.pageCount;
     self.previousButton.alphaValue = self.previousButton.enabled ? 1 : 0.35;
     self.nextButton.alphaValue = self.nextButton.enabled ? 1 : 0.35;
+    self.layingOut = NO;
 }
 
 - (void)drawRect:(NSRect)dirtyRect {
@@ -989,6 +1035,26 @@ static NSString *TickerTruncatedString(NSString *text, NSDictionary *attributes,
         [pageLabel drawAtPoint:NSMakePoint(labelX, NSMinY(self.previousButton.frame) + (NSHeight(self.previousButton.frame) - pageSize.height) / 2.0) withAttributes:pageAttributes];
     }
 }
+
+- (BOOL)acceptsFirstResponder { return YES; }
+
+- (void)keyDown:(NSEvent *)event {
+    [self interpretKeyEvents:@[event]];
+}
+
+- (void)moveLeft:(id)sender { [self stepPage:-1]; }
+- (void)moveRight:(id)sender { [self stepPage:1]; }
+- (void)moveUp:(id)sender { [self stepPage:-1]; }
+- (void)moveDown:(id)sender { [self stepPage:1]; }
+
+- (void)insertNewline:(id)sender {
+    if (self.confirmButton.hidden || !self.confirmButton.enabled) return;
+    [NSApp sendAction:self.confirmButton.action to:self.confirmButton.target from:self.confirmButton];
+}
+
+- (void)cancelOperation:(id)sender {
+    [NSApp sendAction:self.cancelButton.action to:self.cancelButton.target from:self.cancelButton];
+}
 @end
 
 #pragma mark - Controller
@@ -1018,8 +1084,13 @@ static NSString *TickerTruncatedString(NSString *text, NSDictionary *attributes,
 @property (readwrite, getter=isSelecting) BOOL selecting;
 @property (readwrite, getter=isUninstallSheetVisible) BOOL uninstallSheetVisible;
 @property (readwrite, getter=isUpdateSheetVisible) BOOL updateSheetVisible;
+@property (readwrite) NSWindow *updateWindow;
+@property TickerFlippedView *updateHost;
+@property BOOL updateWindowIsClosing;
+- (BOOL)updateSheetCommand:(SEL)commandSelector;
+- (void)ensureUpdateWindow;
+- (void)placeDetachedUpdateWindow;
 @property (copy) NSString *backgroundUpdateStatus;
-@property TickerMenuBackdrop *updateBackdrop;
 @property TickerUpdateSheet *updateSheet;
 @property NSMutableOrderedSet<NSString *> *selectedKeySet;
 @property NSInteger selectionAnchor;
@@ -1302,11 +1373,6 @@ static NSString *TickerTruncatedString(NSString *text, NSDictionary *attributes,
     self.uninstallSheet.confirmButton.action = @selector(confirmUninstallPressed);
     [self.root addSubview:self.uninstallSheet];
 
-    self.updateBackdrop = [[TickerMenuBackdrop alloc] initWithFrame:NSMakeRect(0, 0, TickerPanelSize.width, TickerPanelSize.height)];
-    self.updateBackdrop.hidden = YES;
-    __weak typeof(self) weakSelf = self;
-    self.updateBackdrop.clickHandler = ^{ [weakSelf cancelUpdatePressed]; };
-    [self.root addSubview:self.updateBackdrop];
     self.updateSheet = [[TickerUpdateSheet alloc] initWithFrame:NSZeroRect];
     self.updateSheet.fillColor = RGBA(0.110, 0.133, 0.169, 1);
     self.updateSheet.strokeColor = BorderColor();
@@ -1321,7 +1387,6 @@ static NSString *TickerTruncatedString(NSString *text, NSDictionary *attributes,
     self.updateSheet.cancelButton.action = @selector(cancelUpdatePressed);
     self.updateSheet.confirmButton.target = self;
     self.updateSheet.confirmButton.action = @selector(confirmUpdatePressed);
-    [self.updateBackdrop addSubview:self.updateSheet];
 }
 
 #pragma mark Data
@@ -1394,8 +1459,6 @@ static NSString *TickerTruncatedString(NSString *text, NSDictionary *attributes,
         self.uninstallSheet.needsDisplay = YES;
     }
     if (self.updateSheetVisible) {
-        [self.root addSubview:self.updateBackdrop positioned:NSWindowAbove relativeTo:nil];
-        self.updateBackdrop.hidden = NO;
         self.updateSheet.hidden = NO;
         [self.updateSheet relayout];
         self.updateSheet.needsDisplay = YES;
@@ -2072,28 +2135,95 @@ static NSString *TickerTruncatedString(NSString *text, NSDictionary *attributes,
     [self reload];
 }
 
+- (void)ensureUpdateWindow {
+    if (self.updateWindow) return;
+    TickerUpdateWindow *window = [[TickerUpdateWindow alloc] initWithContentRect:NSMakeRect(0, 0, TickerPanelSize.width, 180)
+                                                                        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
+                                                                          backing:NSBackingStoreBuffered
+                                                                            defer:NO];
+    window.title = @"Update";
+    window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+    window.backgroundColor = RGBA(0.110, 0.133, 0.169, 1);
+    window.titlebarAppearsTransparent = YES;
+    window.movableByWindowBackground = YES;
+    window.releasedWhenClosed = NO;
+    window.hidesOnDeactivate = NO;
+    window.level = NSFloatingWindowLevel;
+    window.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorMoveToActiveSpace;
+    window.delegate = self;
+    TickerFlippedView *host = [[TickerFlippedView alloc] initWithFrame:NSMakeRect(0, 0, TickerPanelSize.width, 180)];
+    host.fillColor = RGBA(0.110, 0.133, 0.169, 1);
+    host.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    window.contentView = host;
+    self.updateHost = host;
+    __weak typeof(self) weakSelf = self;
+    window.cancelHandler = ^{ [weakSelf cancelUpdatePressed]; };
+    window.commandHandler = ^(SEL command) { [weakSelf updateSheetCommand:command]; };
+    self.updateWindow = window;
+}
+
+- (void)placeDetachedUpdateWindow {
+    NSSize contentSize = [self.updateSheet preferredContentSize];
+    [self.updateWindow setContentSize:contentSize];
+    NSRect frame = self.updateWindow.frame;
+    NSScreen *screen = self.panel.screen ?: [NSScreen mainScreen];
+    NSRect visible = screen ? screen.visibleFrame : NSMakeRect(0, 0, 1280, 800);
+    if (NSWidth(visible) < NSWidth(frame) + 16 || NSHeight(visible) < NSHeight(frame) + 16) {
+        visible = NSMakeRect(0, 0, MAX(1280, NSWidth(frame) + 80), MAX(800, NSHeight(frame) + 80));
+    }
+    CGFloat x = NSMidX(visible) - NSWidth(frame) / 2.0;
+    CGFloat y = NSMidY(visible) - NSHeight(frame) / 2.0;
+    NSRect panelFrame = self.panel.frame;
+    BOOL panelOnScreen = self.panel.isVisible && NSMinX(panelFrame) > -10000 && NSIntersectsRect(panelFrame, visible);
+    if (panelOnScreen) {
+        x = NSMidX(panelFrame) - NSWidth(frame) / 2.0;
+        y = NSMinY(panelFrame) - NSHeight(frame) - 12;
+        if (y < NSMinY(visible) + 8) y = NSMaxY(panelFrame) + 12;
+    }
+    x = MAX(NSMinX(visible) + 8, MIN(x, NSMaxX(visible) - NSWidth(frame) - 8));
+    y = MAX(NSMinY(visible) + 8, MIN(y, NSMaxY(visible) - NSHeight(frame) - 8));
+    [self.updateWindow setFrame:NSMakeRect(x, y, NSWidth(frame), NSHeight(frame)) display:YES];
+}
+
+- (BOOL)isUpdateConfirmationDetached {
+    return self.updateSheetVisible && self.updateWindow != nil && self.updateSheet.window == self.updateWindow && self.updateWindow != self.panel;
+}
+
 - (void)presentUpdateConfirmationWithTitle:(NSString *)title detail:(NSString *)detail commands:(NSArray<NSString *> *)commands {
     self.menuVisible = NO;
     [self layoutMenu];
+    [self ensureUpdateWindow];
     self.updateSheet.heading = title ?: @"";
     self.updateSheet.detailText = detail ?: @"";
     self.updateSheet.commands = commands ?: @[];
     self.updateSheet.page = 0;
     self.updateSheet.cancelButton.title = commands.count > 0 ? @"Cancel" : @"Close";
-    [self.updateSheet relayout];
-    self.updateBackdrop.hidden = NO;
     self.updateSheet.hidden = NO;
+    if (self.updateSheet.superview != self.updateHost) {
+        [self.updateSheet removeFromSuperview];
+        [self.updateHost addSubview:self.updateSheet];
+    }
+    self.updateWindow.title = title.length > 0 ? title : @"Update";
+    [self.updateSheet relayout];
+    [self placeDetachedUpdateWindow];
+    [self.updateSheet relayout];
     self.updateSheetVisible = YES;
-    [self.root addSubview:self.updateBackdrop positioned:NSWindowAbove relativeTo:nil];
     self.updateSheet.needsDisplay = YES;
     self.pathLabel.stringValue = @"~/cli/update";
+    [self.updateWindow makeFirstResponder:self.updateSheet];
+    [self.updateWindow orderFrontRegardless];
+    [NSApp activateIgnoringOtherApps:YES];
+    [self.updateWindow makeKeyAndOrderFront:nil];
+    // The status panel is a higher window level and resigns when this window becomes key.
+    // Closing it here covers the case where it was visible without being key, and does not
+    // cancel the confirmation.
+    if (self.panel.isVisible) [self close];
 }
 
 - (void)dismissUpdateConfirmation {
-    self.updateBackdrop.hidden = YES;
-    self.updateSheet.hidden = YES;
     self.updateSheetVisible = NO;
     self.updateSheet.commands = @[];
+    if (!self.updateWindowIsClosing && self.updateWindow.isVisible) [self.updateWindow orderOut:nil];
 }
 
 - (void)cancelUpdatePressed {
@@ -2225,7 +2355,7 @@ static NSString *TickerTruncatedString(NSString *text, NSDictionary *attributes,
 }
 
 - (void)close {
-    [self dismissUpdateConfirmation];
+    // The update confirmation is its own window. Closing the status panel must not cancel it.
     self.menuVisible = NO;
     self.settingsVisible = NO;
     [self layoutMenu];
@@ -2238,9 +2368,31 @@ static NSString *TickerTruncatedString(NSString *text, NSDictionary *attributes,
 }
 
 - (void)windowDidResignKey:(NSNotification *)notification {
+    if (notification.object != self.panel) return;
     if (!self.panel.isVisible) return;
     self.lastResignDate = [NSDate date];
     [self close];
+}
+
+- (void)windowWillClose:(NSNotification *)notification {
+    if (notification.object != self.updateWindow || !self.updateSheetVisible) return;
+    self.updateWindowIsClosing = YES;
+    [self cancelUpdatePressed];
+    self.updateWindowIsClosing = NO;
+}
+
+- (NSBitmapImageRep *)renderUpdateConfirmationBitmap {
+    if (!self.updateSheetVisible) return nil;
+    [self.updateSheet relayout];
+    [self.updateSheet layoutSubtreeIfNeeded];
+    NSRect bounds = self.updateSheet.bounds;
+    if (NSWidth(bounds) < 1 || NSHeight(bounds) < 1) {
+        NSSize size = [self.updateSheet preferredContentSize];
+        bounds = NSMakeRect(0, 0, size.width, size.height);
+    }
+    NSBitmapImageRep *bitmap = [self.updateSheet bitmapImageRepForCachingDisplayInRect:bounds];
+    [self.updateSheet cacheDisplayInRect:bounds toBitmapImageRep:bitmap];
+    return bitmap;
 }
 
 - (NSBitmapImageRep *)renderContentBitmap {
