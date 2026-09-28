@@ -725,7 +725,6 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     }
     NSDictionary *data = self.rows[row];
     [self configureCell:cell withRow:data];
-    cell.actionButton.tag = row;
     return cell;
 }
 
@@ -811,8 +810,9 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     [self.delegate tickerPanel:self activateRow:row];
 }
 
+// Reused cell views can outlive a reload that reorders rows, so resolve the row at press time.
 - (void)rowButtonPressed:(NSButton *)sender {
-    NSDictionary *row = [self rowAtIndex:sender.tag];
+    NSDictionary *row = [self rowAtIndex:[self.tableView rowForView:sender]];
     if (!row) return;
     [self.delegate tickerPanel:self pressButtonOnRow:row];
 }
