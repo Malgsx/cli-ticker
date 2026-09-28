@@ -10,10 +10,12 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install icon dependency
-        run: python3 -m pip install --break-system-packages pillow
       - name: Build distributable
-        run: make dist
+        run: make dist VERSION="${GITHUB_REF_NAME#v}"
+      - name: Verify archive
+        run: |
+          tar -tzf build/dist/CLITicker.app.tar.gz | grep -qx 'CLITicker.app/Contents/MacOS/CLITicker'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/CLITicker.app/Contents/Info.plist)" = "${GITHUB_REF_NAME#v}"
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:

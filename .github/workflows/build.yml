@@ -62,3 +62,71 @@ jobs:
             echo "App exited early." >&2
             exit 1
           fi
+
+  # The next two jobs run the README commands verbatim on a clean runner. Off main,
+  # they are pinned to this commit so the PR's own install.sh / sources are tested.
+  readme-install:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: repo
+      - name: Run the README install one-liner
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SRC_REPO: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+        run: |
+          cmd="$(grep -m1 -E '^curl -fsSL https://raw\.githubusercontent\.com/Malgsx/cli-ticker/main/install\.sh \| bash$' repo/README.md)"
+          test -n "$cmd" || { echo "README install one-liner not found" >&2; exit 1; }
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            cmd="${cmd/Malgsx\/cli-ticker\/main\//$SRC_REPO/$SHA/}"
+          fi
+          test ! -e ~/Applications/CLITicker.app
+          cd "$RUNNER_TEMP"
+          echo "+ $cmd"
+          bash -c "$cmd"
+      - name: Verify install and launch
+        run: |
+          app=~/Applications/CLITicker.app
+          test -x "$app/Contents/MacOS/CLITicker"
+          if xattr "$app" | grep -q com.apple.quarantine; then echo "quarantine flag left on the app" >&2; exit 1; fi
+          installed="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
+          latest="$(curl -fsSI https://github.com/Malgsx/cli-ticker/releases/latest | tr -d '\r' | awk 'tolower($1) == "location:" { print $2 }' | sed 's#.*/tag/v##')"
+          echo "installed $installed, latest release $latest"
+          test "$installed" = "$latest"
+          for _ in $(seq 1 20); do pgrep -x CLITicker >/dev/null && break; sleep 1; done
+          pid="$(pgrep -x CLITicker)" || { echo "CLITicker is not running after install" >&2; exit 1; }
+          ps -o command= -p "$pid" | grep -q "^$app/Contents/MacOS/CLITicker" || { ps -o command= -p "$pid"; exit 1; }
+          sleep 10
+          kill -0 "$pid" || { echo "CLITicker exited early" >&2; exit 1; }
+          echo "CLITicker $installed launched from $app and is still running."
+
+  readme-build-from-source:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: repo
+      - name: Run the README build-from-source one-liner
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          cmd="$(grep -m1 -E '^git clone https://github\.com/Malgsx/cli-ticker\.git && cd cli-ticker && \./cli run$' repo/README.md)"
+          test -n "$cmd" || { echo "README build-from-source one-liner not found" >&2; exit 1; }
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            cmd="git clone https://github.com/Malgsx/cli-ticker.git && cd cli-ticker && git fetch -q origin $SHA && git checkout -q FETCH_HEAD && ./cli run"
+          fi
+          if python3 -c 'import PIL' 2>/dev/null; then echo "note: Pillow is present on this runner"; fi
+          mkdir -p "$RUNNER_TEMP/somewhere" && cd "$RUNNER_TEMP/somewhere"
+          echo "+ $cmd"
+          bash -c "$cmd"
+      - name: Verify build and launch
+        run: |
+          app="$RUNNER_TEMP/somewhere/cli-ticker/build/CLITicker.app"
+          test -x "$app/Contents/MacOS/CLITicker"
+          for _ in $(seq 1 20); do pgrep -x CLITicker >/dev/null && break; sleep 1; done
+          pid="$(pgrep -x CLITicker)" || { echo "CLITicker is not running after ./cli run" >&2; exit 1; }
+          ps -o command= -p "$pid"
+          sleep 10
+          kill -0 "$pid" || { echo "CLITicker exited early" >&2; exit 1; }
+          echo "Built from source and launched; still running."

@@ -5,16 +5,16 @@ CLI is intended to be easy to fork and customize.
 ## Local Setup
 
 ```sh
-git clone https://github.com/<your-username>/cli-ticker.git
-cd cli-ticker
-make run
+git clone https://github.com/<your-username>/cli-ticker.git && cd cli-ticker && ./cli run
 ```
 
 Requirements:
 
 - macOS
 - Xcode Command Line Tools
-- Python 3 with Pillow for regenerating icon assets
+- Python 3 with Pillow, only for `make icons`
+
+See [docs/customizing.md](docs/customizing.md) for the project layout.
 
 ## Development Notes
 
