@@ -374,14 +374,14 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 
 #pragma mark - Controller
 
-@interface TickerPanelController () <NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate, NSSearchFieldDelegate>
+@interface TickerPanelController () <NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate, NSTextFieldDelegate>
 @property (readwrite) NSPanel *panel;
 @property NSDictionary *snapshot;
 @property NSArray<NSDictionary *> *rows;
 @property TickerFlippedView *root;
 @property TickerFlippedView *sidebar;
 @property NSTextField *pathLabel;
-@property NSSearchField *searchField;
+@property NSTextField *searchField;
 @property NSTextField *headerTitle;
 @property NSTextField *headerVersion;
 @property NSTextField *headerVia;
@@ -468,20 +468,30 @@ NSImage *TickerMonogramIcon(NSString *mark) {
     self.pathLabel.frame = NSMakeRect(28, 6, 220, 16);
     [self.root addSubview:self.pathLabel];
 
-    self.searchField = [[NSSearchField alloc] initWithFrame:NSMakeRect(250, 4, 170, 20)];
+    TickerFlippedView *searchBox = [[TickerFlippedView alloc] initWithFrame:NSMakeRect(250, 5, 176, 18)];
+    searchBox.fillColor = RGBA(0, 0, 0, 0.20);
+    searchBox.strokeColor = DividerColor();
+    [self.root addSubview:searchBox];
+    NSImageView *glass = [NSImageView imageViewWithImage:SymbolImage(@"magnifyingglass", 9)];
+    glass.contentTintColor = TextDim();
+    glass.frame = NSMakeRect(6, 3, 11, 12);
+    [searchBox addSubview:glass];
+
+    self.searchField = [[NSTextField alloc] initWithFrame:NSMakeRect(21, 2, 150, 14)];
     self.searchField.font = TickerFont(10.5, NSFontWeightRegular);
-    self.searchField.placeholderString = @"search clis";
+    self.searchField.placeholderAttributedString = [[NSAttributedString alloc] initWithString:@"search clis" attributes:@{
+        NSFontAttributeName: TickerFont(10.5, NSFontWeightRegular),
+        NSForegroundColorAttributeName: TextDim()
+    }];
     self.searchField.focusRingType = NSFocusRingTypeNone;
-    self.searchField.bezelStyle = NSTextFieldSquareBezel;
+    self.searchField.bezeled = NO;
     self.searchField.bordered = NO;
-    self.searchField.drawsBackground = YES;
-    self.searchField.backgroundColor = RGBA(0, 0, 0, 0.18);
+    self.searchField.drawsBackground = NO;
     self.searchField.textColor = TextPrimary();
+    self.searchField.cell.scrollable = YES;
+    self.searchField.cell.usesSingleLineMode = YES;
     self.searchField.delegate = self;
-    self.searchField.sendsSearchStringImmediately = YES;
-    self.searchField.target = self;
-    self.searchField.action = @selector(searchChanged:);
-    [self.root addSubview:self.searchField];
+    [searchBox addSubview:self.searchField];
 
     NSArray *buttons = @[
         [self toolbarButton:@"arrow.clockwise" tooltip:@"Refresh now (⌘R)" action:@selector(refreshPressed:)],
@@ -827,6 +837,10 @@ NSImage *TickerMonogramIcon(NSString *mark) {
 }
 
 #pragma mark Search
+
+- (void)controlTextDidChange:(NSNotification *)notification {
+    [self searchChanged:notification.object];
+}
 
 - (void)searchChanged:(id)sender {
     [self.tableView deselectAll:nil];

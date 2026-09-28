@@ -37,7 +37,7 @@ static BOOL IsSystemPath(NSString *path) {
 @property NSMutableDictionary *versionCache;
 @property NSMutableDictionary *githubCache;
 @property NSMutableDictionary<NSString *, NSImage *> *iconCache;
-@property NSArray<NSDictionary *> *statuses;
+@property (nonatomic) NSArray<NSDictionary *> *statuses;
 @property (readwrite, getter=isChecking) BOOL checking;
 @property BOOL pendingForce;
 @property NSArray<NSDictionary *> *pendingInventory;

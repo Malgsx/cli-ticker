@@ -22,7 +22,7 @@ extern NSString *const CLIUpdateStateFailed;
 @property (copy) void (^changeHandler)(void);
 // Called on the main queue after an update finishes so the inventory can rescan.
 @property (copy) void (^updateFinishedHandler)(NSDictionary *status, BOOL succeeded);
-@property (readonly) NSArray<NSDictionary *> *statuses;
+@property (nonatomic, readonly) NSArray<NSDictionary *> *statuses;
 @property (readonly, getter=isChecking) BOOL checking;
 
 - (instancetype)initWithRegistryURL:(NSURL *)registryURL iconDirectory:(NSString *)iconDirectory cacheDirectory:(NSURL *)cacheDirectory;
