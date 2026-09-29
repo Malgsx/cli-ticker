@@ -2149,7 +2149,9 @@ static NSString *TickerTruncatedString(NSString *text, NSDictionary *attributes,
     window.releasedWhenClosed = NO;
     window.hidesOnDeactivate = NO;
     window.level = NSFloatingWindowLevel;
-    window.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorMoveToActiveSpace;
+    // MoveToActiveSpace and CanJoinAllSpaces cannot be combined. This window
+    // should appear on the space the user is using when the confirmation opens.
+    window.collectionBehavior = NSWindowCollectionBehaviorMoveToActiveSpace | NSWindowCollectionBehaviorFullScreenAuxiliary;
     window.delegate = self;
     TickerFlippedView *host = [[TickerFlippedView alloc] initWithFrame:NSMakeRect(0, 0, TickerPanelSize.width, 180)];
     host.fillColor = RGBA(0.110, 0.133, 0.169, 1);

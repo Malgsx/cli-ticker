@@ -658,6 +658,8 @@ static void AssertUpdateConfirmationDetached(TickerPanelController *panel) {
     Assert((updateWindow.styleMask & NSWindowStyleMaskClosable) != 0, @"the window has a close button");
     Assert(updateWindow.movable, @"the detached window can be moved");
     Assert(updateWindow.level == NSFloatingWindowLevel, @"the confirmation floats on its own");
+    Assert((updateWindow.collectionBehavior & NSWindowCollectionBehaviorMoveToActiveSpace) != 0, @"opening the confirmation brings it to the active space");
+    Assert((updateWindow.collectionBehavior & NSWindowCollectionBehaviorCanJoinAllSpaces) == 0, @"the detached window does not also join every space");
     Assert(updateWindow.level != panel.panel.level, @"it is not glued to the status-item window level");
     Assert(panel.panel.childWindows == nil || ![panel.panel.childWindows containsObject:updateWindow], @"it is not a child of the status panel");
     Assert(NSWidth(sheet.frame) >= TickerPanelSize.width - 1, @"the window is wide enough for the ten-per-page grid");
